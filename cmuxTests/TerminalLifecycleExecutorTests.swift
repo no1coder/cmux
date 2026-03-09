@@ -1469,6 +1469,57 @@ final class TerminalLifecycleExecutorTests: XCTestCase {
         XCTAssertNil(plan.refreshReason)
     }
 
+    func testSynchronizationGeometryStateClampsVisibleFrameIntoHostBounds() {
+        let state = TerminalLifecycleExecutor.synchronizationGeometryState(
+            frameInHost: NSRect(x: -20, y: 10, width: 80, height: 50),
+            hostBounds: NSRect(x: 0, y: 0, width: 100, height: 100),
+            tinyHideThreshold: 1,
+            minimumRevealWidth: 20,
+            minimumRevealHeight: 20
+        )
+
+        XCTAssertTrue(state.hostBoundsReady)
+        XCTAssertTrue(state.hasFiniteFrame)
+        XCTAssertEqual(state.targetFrame, NSRect(x: 0, y: 10, width: 60, height: 50))
+        XCTAssertFalse(state.tinyFrame)
+        XCTAssertTrue(state.revealReadyForDisplay)
+        XCTAssertFalse(state.outsideHostBounds)
+    }
+
+    func testSynchronizationGeometryStateMarksOutsideBoundsWhenNoVisibleIntersection() {
+        let state = TerminalLifecycleExecutor.synchronizationGeometryState(
+            frameInHost: NSRect(x: 150, y: 10, width: 40, height: 40),
+            hostBounds: NSRect(x: 0, y: 0, width: 100, height: 100),
+            tinyHideThreshold: 1,
+            minimumRevealWidth: 20,
+            minimumRevealHeight: 20
+        )
+
+        XCTAssertTrue(state.hostBoundsReady)
+        XCTAssertTrue(state.hasFiniteFrame)
+        XCTAssertEqual(state.targetFrame, NSRect(x: 150, y: 10, width: 40, height: 40))
+        XCTAssertFalse(state.tinyFrame)
+        XCTAssertTrue(state.revealReadyForDisplay)
+        XCTAssertTrue(state.outsideHostBounds)
+    }
+
+    func testSynchronizationGeometryStateMarksHostBoundsNotReadyAndTinyReveal() {
+        let state = TerminalLifecycleExecutor.synchronizationGeometryState(
+            frameInHost: NSRect(x: 0, y: 0, width: 8, height: 8),
+            hostBounds: NSRect(x: 0, y: 0, width: 1, height: 1),
+            tinyHideThreshold: 10,
+            minimumRevealWidth: 20,
+            minimumRevealHeight: 20
+        )
+
+        XCTAssertFalse(state.hostBoundsReady)
+        XCTAssertTrue(state.hasFiniteFrame)
+        XCTAssertEqual(state.targetFrame, NSRect(x: 0, y: 0, width: 8, height: 8))
+        XCTAssertTrue(state.tinyFrame)
+        XCTAssertFalse(state.revealReadyForDisplay)
+        XCTAssertTrue(state.outsideHostBounds)
+    }
+
     func testRevealApplicationPlanRequestsGeometryAndRefreshWhenRevealIsNeeded() {
         let transition = TerminalLifecycleExecutorVisibilityTransitionDecision(
             shouldPreserveVisibleOnTransientLoss: false,

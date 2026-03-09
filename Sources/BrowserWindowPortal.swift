@@ -2461,13 +2461,14 @@ final class WindowBrowserPortal: NSObject {
         let frameInHostRaw = hostView.convert(frameInWindow, from: nil)
         let frameInHost = Self.pixelSnappedRect(frameInHostRaw, in: hostView)
         let hostBounds = hostView.bounds
-        let hasFiniteHostBounds =
-            hostBounds.origin.x.isFinite &&
-            hostBounds.origin.y.isFinite &&
-            hostBounds.size.width.isFinite &&
-            hostBounds.size.height.isFinite
-        let hostBoundsReady = hasFiniteHostBounds && hostBounds.width > 1 && hostBounds.height > 1
-        if !hostBoundsReady {
+        let anchorHidden = Self.isHiddenOrAncestorHidden(anchorView)
+        let geometryState = BrowserLifecycleExecutor.synchronizationGeometryState(
+            entryVisibleInUI: entry.visibleInUI,
+            frameInHost: frameInHost,
+            hostBounds: hostBounds,
+            anchorHidden: anchorHidden
+        )
+        if !geometryState.hostBoundsReady {
 #if DEBUG
             dlog(
                 "browser.portal.sync.defer container=\(browserPortalDebugToken(containerView)) " +
@@ -2487,40 +2488,12 @@ final class WindowBrowserPortal: NSObject {
             return
         }
         let oldFrame = containerView.frame
-        let hasFiniteFrame =
-            frameInHost.origin.x.isFinite &&
-            frameInHost.origin.y.isFinite &&
-            frameInHost.size.width.isFinite &&
-            frameInHost.size.height.isFinite
-        let clampedFrame = frameInHost.intersection(hostBounds)
-        let hasVisibleIntersection =
-            !clampedFrame.isNull &&
-            clampedFrame.width > 1 &&
-            clampedFrame.height > 1
-        let targetFrame = hasVisibleIntersection ? clampedFrame : frameInHost
-        let anchorHidden = Self.isHiddenOrAncestorHidden(anchorView)
-        let tinyFrame = targetFrame.width <= 1 || targetFrame.height <= 1
-        let outsideHostBounds = !hasVisibleIntersection
-        let shouldHide =
-            !entry.visibleInUI ||
-            anchorHidden ||
-            tinyFrame ||
-            !hasFiniteFrame ||
-            outsideHostBounds
-        let transientRecoveryReason = BrowserLifecycleExecutor.transientRecoveryReason(
-            entryVisibleInUI: entry.visibleInUI,
-            anchorHidden: anchorHidden,
-            hasFiniteFrame: hasFiniteFrame,
-            outsideHostBounds: outsideHostBounds,
-            tinyFrame: tinyFrame
-        )
+        let targetFrame = geometryState.targetFrame
+        let transientRecoveryReason = geometryState.transientRecoveryReason
         let transientRecoveryPlan = transientRecoveryReason.map(transientRecoveryPlan)
-        let shouldPreserveVisibleOnTransientGeometry =
-            transientRecoveryPlan?.shouldPreserveVisible == true &&
-            shouldHide
         let presentationPlan = BrowserLifecycleExecutor.presentationPlan(
             targetVisible: entry.visibleInUI,
-            shouldHideContainer: shouldHide
+            shouldHideContainer: geometryState.shouldHideContainer
         )
         let presentationApplicationPlan = BrowserLifecycleExecutor.presentationApplicationPlan(
             presentation: presentationPlan,
@@ -2528,8 +2501,7 @@ final class WindowBrowserPortal: NSObject {
             paneTopChromeHeight: entry.paneTopChromeHeight
         )
 #if DEBUG
-        let frameWasClamped = hasFiniteFrame && !Self.rectApproximatelyEqual(frameInHost, targetFrame)
-        if frameWasClamped {
+        if geometryState.frameWasClamped {
             dlog(
                 "browser.portal.frame.clamp container=\(browserPortalDebugToken(containerView)) " +
                 "web=\(browserPortalDebugToken(webView)) anchor=\(browserPortalDebugToken(anchorView)) " +
@@ -2537,8 +2509,10 @@ final class WindowBrowserPortal: NSObject {
                 "host=\(browserPortalDebugFrame(hostBounds))"
             )
         }
-        let collapsedToTiny = oldFrame.width > 1 && oldFrame.height > 1 && tinyFrame
-        let restoredFromTiny = (oldFrame.width <= 1 || oldFrame.height <= 1) && !tinyFrame
+        let collapsedToTiny = oldFrame.width > 1 && oldFrame.height > 1 && geometryState.tinyFrame
+        let restoredFromTiny =
+            (oldFrame.width <= 1 || oldFrame.height <= 1) &&
+            !geometryState.tinyFrame
         if collapsedToTiny {
             dlog(
                 "browser.portal.frame.collapse container=\(browserPortalDebugToken(containerView)) " +
@@ -2553,15 +2527,28 @@ final class WindowBrowserPortal: NSObject {
             )
         }
 #endif
-        if shouldPreserveVisibleOnTransientGeometry {
+        let visibleSyncPlan = BrowserLifecycleExecutor.visibleSyncPlan(
+            presentationApplicationPlan: presentationApplicationPlan,
+            transientRecoveryPlan: transientRecoveryPlan,
+            transientRecoveryReason: transientRecoveryReason,
+            forcePresentationRefresh: forcePresentationRefresh,
+            hasPendingRefreshReasons: !refreshReasons.isEmpty,
+            geometryStateShouldHideContainer: geometryState.shouldHideContainer
+        )
+        if visibleSyncPlan.shouldPreserveVisibleOnTransientGeometry {
 #if DEBUG
             dlog(
                 "browser.portal.hidden.deferKeep web=\(browserPortalDebugToken(webView)) " +
-                "reason=\(transientRecoveryReason?.rawValue ?? "unknown") frame=\(browserPortalDebugFrame(containerView.frame))"
+                    "reason=\(transientRecoveryReason?.rawValue ?? "unknown") frame=\(browserPortalDebugFrame(containerView.frame))"
             )
 #endif
         }
-        if !Self.rectApproximatelyEqual(oldFrame, targetFrame) {
+        let frameApplicationPlan = BrowserLifecycleExecutor.frameApplicationPlan(
+            oldFrame: oldFrame,
+            currentBounds: containerView.bounds,
+            targetFrame: targetFrame
+        )
+        if frameApplicationPlan.shouldUpdateFrame {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             containerView.frame = targetFrame
@@ -2569,18 +2556,17 @@ final class WindowBrowserPortal: NSObject {
             refreshReasons.append("frame")
         }
 
-        let expectedContainerBounds = NSRect(origin: .zero, size: targetFrame.size)
-        if !Self.rectApproximatelyEqual(containerView.bounds, expectedContainerBounds) {
+        if frameApplicationPlan.shouldNormalizeBounds {
             let oldContainerBounds = containerView.bounds
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            containerView.bounds = expectedContainerBounds
+            containerView.bounds = frameApplicationPlan.expectedContainerBounds
             CATransaction.commit()
 #if DEBUG
             dlog(
                 "browser.portal.bounds.normalize container=\(browserPortalDebugToken(containerView)) " +
                 "web=\(browserPortalDebugToken(webView)) old=\(browserPortalDebugFrame(oldContainerBounds)) " +
-                "target=\(browserPortalDebugFrame(expectedContainerBounds))"
+                "target=\(browserPortalDebugFrame(frameApplicationPlan.expectedContainerBounds))"
             )
 #endif
             refreshReasons.append("bounds")
@@ -2591,14 +2577,18 @@ final class WindowBrowserPortal: NSObject {
         let inspectorHeightFromInsets = max(0, containerBounds.height - preNormalizeWebFrame.height)
         let inspectorHeightFromOverflow = max(0, preNormalizeWebFrame.maxY - containerBounds.maxY)
         let inspectorHeightApprox = max(inspectorHeightFromInsets, inspectorHeightFromOverflow)
+        let webFrameNormalizationPlan = BrowserLifecycleExecutor.webFrameNormalizationPlan(
+            currentWebFrame: preNormalizeWebFrame,
+            containerBounds: containerBounds
+        )
 #if DEBUG
         let inspectorSubviews = Self.inspectorSubviewCount(in: containerView)
 #endif
-        if Self.frameExtendsOutsideBounds(preNormalizeWebFrame, bounds: containerBounds) {
+        if webFrameNormalizationPlan.shouldNormalizeWebFrame {
             let oldWebFrame = preNormalizeWebFrame
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            webView.frame = containerBounds
+            webView.frame = webFrameNormalizationPlan.normalizedWebFrame
             CATransaction.commit()
 #if DEBUG
             dlog(
@@ -2615,7 +2605,7 @@ final class WindowBrowserPortal: NSObject {
             refreshReasons.append("webFrame")
         }
 
-        if !shouldPreserveVisibleOnTransientGeometry {
+        if visibleSyncPlan.shouldApplyPresentationApplicationPlan {
             applyPresentationApplicationPlan(
                 presentationApplicationPlan,
                 entry: entry,
@@ -2624,30 +2614,31 @@ final class WindowBrowserPortal: NSObject {
                 targetFrame: targetFrame,
                 hostBounds: hostBounds,
                 anchorHidden: anchorHidden,
-                tinyFrame: tinyFrame,
-                hasFiniteFrame: hasFiniteFrame,
-                outsideHostBounds: outsideHostBounds,
+                tinyFrame: geometryState.tinyFrame,
+                hasFiniteFrame: geometryState.hasFiniteFrame,
+                outsideHostBounds: geometryState.outsideHostBounds,
                 refreshReasons: &refreshReasons
             )
         }
-        if forcePresentationRefresh {
+        if visibleSyncPlan.shouldAppendAnchorRefreshReason {
             refreshReasons.append("anchor")
         }
-        if let transientRecoveryPlan, let transientRecoveryReason,
-           presentationApplicationPlan.shouldHideContainer {
+        if visibleSyncPlan.shouldApplyTransientRecoveryPlan,
+           let transientRecoveryPlan,
+           let transientRecoveryReason {
             applyTransientRecoveryPlan(
                 transientRecoveryPlan,
                 reason: transientRecoveryReason,
                 preserveVisibleLog:
-                    shouldPreserveVisibleOnTransientGeometry
+                    visibleSyncPlan.shouldPreserveVisibleOnTransientGeometry
                     ? "browser.portal.hidden.deferKeep web=\(browserPortalDebugToken(webView)) " +
                         "reason=\(transientRecoveryReason.rawValue) frame=\(browserPortalDebugFrame(containerView.frame))"
                     : nil
             )
-        } else if transientRecoveryReason == nil {
+        } else if visibleSyncPlan.shouldTrackVisibleEntry {
             entriesByWebViewId[webViewId] = entry
         }
-        if !presentationApplicationPlan.shouldHideContainer, !refreshReasons.isEmpty {
+        if visibleSyncPlan.shouldRefreshHostedPresentation {
             refreshHostedWebViewPresentation(
                 webView,
                 in: containerView,

@@ -292,6 +292,182 @@ final class BrowserLifecycleExecutorTests: XCTestCase {
         XCTAssertFalse(plan.shouldUpdateEntryVisibility)
     }
 
+    func testSynchronizationGeometryStateClampsVisibleFrameToHostBounds() {
+        let state = BrowserLifecycleExecutor.synchronizationGeometryState(
+            entryVisibleInUI: true,
+            frameInHost: CGRect(x: -20, y: 10, width: 140, height: 80),
+            hostBounds: CGRect(x: 0, y: 0, width: 100, height: 100),
+            anchorHidden: false
+        )
+
+        XCTAssertTrue(state.hostBoundsReady)
+        XCTAssertTrue(state.hasFiniteFrame)
+        XCTAssertTrue(state.frameWasClamped)
+        XCTAssertEqual(state.targetFrame, CGRect(x: 0, y: 10, width: 100, height: 80))
+        XCTAssertFalse(state.tinyFrame)
+        XCTAssertFalse(state.outsideHostBounds)
+        XCTAssertFalse(state.shouldHideContainer)
+        XCTAssertNil(state.transientRecoveryReason)
+    }
+
+    func testSynchronizationGeometryStateMarksOutsideBoundsVisibleBrowserTransient() {
+        let state = BrowserLifecycleExecutor.synchronizationGeometryState(
+            entryVisibleInUI: true,
+            frameInHost: CGRect(x: 160, y: 20, width: 40, height: 40),
+            hostBounds: CGRect(x: 0, y: 0, width: 100, height: 100),
+            anchorHidden: false
+        )
+
+        XCTAssertTrue(state.hostBoundsReady)
+        XCTAssertTrue(state.hasFiniteFrame)
+        XCTAssertTrue(state.outsideHostBounds)
+        XCTAssertTrue(state.shouldHideContainer)
+        XCTAssertEqual(state.transientRecoveryReason, .outsideHostBounds)
+        XCTAssertEqual(state.targetFrame, CGRect(x: 160, y: 20, width: 40, height: 40))
+    }
+
+    func testSynchronizationGeometryStateTreatsSmallHostBoundsAsNotReady() {
+        let state = BrowserLifecycleExecutor.synchronizationGeometryState(
+            entryVisibleInUI: true,
+            frameInHost: CGRect(x: 10, y: 10, width: 50, height: 50),
+            hostBounds: CGRect(x: 0, y: 0, width: 1, height: 100),
+            anchorHidden: false
+        )
+
+        XCTAssertFalse(state.hostBoundsReady)
+        XCTAssertTrue(state.hasFiniteFrame)
+        XCTAssertEqual(state.targetFrame, CGRect(x: 10, y: 10, width: 50, height: 50))
+    }
+
+    func testFrameApplicationPlanUpdatesFrameAndBoundsWhenTargetChanges() {
+        let plan = BrowserLifecycleExecutor.frameApplicationPlan(
+            oldFrame: CGRect(x: 0, y: 0, width: 60, height: 40),
+            currentBounds: CGRect(x: 0, y: 0, width: 55, height: 35),
+            targetFrame: CGRect(x: 10, y: 12, width: 100, height: 80)
+        )
+
+        XCTAssertTrue(plan.shouldUpdateFrame)
+        XCTAssertTrue(plan.shouldNormalizeBounds)
+        XCTAssertEqual(plan.expectedContainerBounds, CGRect(x: 0, y: 0, width: 100, height: 80))
+    }
+
+    func testFrameApplicationPlanSkipsApproximateFrameAndBoundsMatch() {
+        let plan = BrowserLifecycleExecutor.frameApplicationPlan(
+            oldFrame: CGRect(x: 10.2, y: 11.9, width: 100.1, height: 79.8),
+            currentBounds: CGRect(x: 0, y: 0, width: 100.2, height: 80.1),
+            targetFrame: CGRect(x: 10, y: 12, width: 100, height: 80)
+        )
+
+        XCTAssertFalse(plan.shouldUpdateFrame)
+        XCTAssertFalse(plan.shouldNormalizeBounds)
+        XCTAssertEqual(plan.expectedContainerBounds, CGRect(x: 0, y: 0, width: 100, height: 80))
+    }
+
+    func testWebFrameNormalizationPlanRequestsNormalizeWhenWebFrameOverflowsContainer() {
+        let plan = BrowserLifecycleExecutor.webFrameNormalizationPlan(
+            currentWebFrame: CGRect(x: 0, y: 0, width: 120, height: 90),
+            containerBounds: CGRect(x: 0, y: 0, width: 100, height: 80)
+        )
+
+        XCTAssertTrue(plan.shouldNormalizeWebFrame)
+        XCTAssertEqual(plan.normalizedWebFrame, CGRect(x: 0, y: 0, width: 100, height: 80))
+    }
+
+    func testWebFrameNormalizationPlanSkipsNormalizeWhenWebFrameFitsContainer() {
+        let plan = BrowserLifecycleExecutor.webFrameNormalizationPlan(
+            currentWebFrame: CGRect(x: 0, y: 0, width: 100, height: 80),
+            containerBounds: CGRect(x: 0, y: 0, width: 100, height: 80)
+        )
+
+        XCTAssertFalse(plan.shouldNormalizeWebFrame)
+        XCTAssertEqual(plan.normalizedWebFrame, CGRect(x: 0, y: 0, width: 100, height: 80))
+    }
+
+    func testVisibleSyncPlanPreservesVisibleDuringScheduledTransientGeometryLoss() {
+        let presentation = BrowserLifecycleExecutorPresentationApplicationPlan(
+            shouldHideContainer: true,
+            shouldRevealContainer: false,
+            paneTopChromeHeight: 0,
+            shouldShowSearchOverlay: false,
+            shouldShowDropZone: false,
+            shouldRefreshForReveal: false
+        )
+        let transient = BrowserLifecycleExecutorTransientRecoveryPlan(
+            shouldPreserveVisible: true,
+            shouldHideContainer: false,
+            shouldClearPaneTopChrome: false,
+            shouldClearSearchOverlay: false,
+            shouldClearDropZone: false,
+            shouldResetRecoveryState: false,
+            shouldScheduleDeferredFullSynchronize: true
+        )
+
+        let plan = BrowserLifecycleExecutor.visibleSyncPlan(
+            presentationApplicationPlan: presentation,
+            transientRecoveryPlan: transient,
+            transientRecoveryReason: .outsideHostBounds,
+            forcePresentationRefresh: false,
+            hasPendingRefreshReasons: true,
+            geometryStateShouldHideContainer: true
+        )
+
+        XCTAssertTrue(plan.shouldPreserveVisibleOnTransientGeometry)
+        XCTAssertFalse(plan.shouldApplyPresentationApplicationPlan)
+        XCTAssertTrue(plan.shouldApplyTransientRecoveryPlan)
+        XCTAssertFalse(plan.shouldTrackVisibleEntry)
+        XCTAssertFalse(plan.shouldRefreshHostedPresentation)
+    }
+
+    func testVisibleSyncPlanRefreshesVisibleHostedPresentationForAnchorDelta() {
+        let presentation = BrowserLifecycleExecutorPresentationApplicationPlan(
+            shouldHideContainer: false,
+            shouldRevealContainer: false,
+            paneTopChromeHeight: 32,
+            shouldShowSearchOverlay: true,
+            shouldShowDropZone: true,
+            shouldRefreshForReveal: false
+        )
+
+        let plan = BrowserLifecycleExecutor.visibleSyncPlan(
+            presentationApplicationPlan: presentation,
+            transientRecoveryPlan: nil,
+            transientRecoveryReason: nil,
+            forcePresentationRefresh: true,
+            hasPendingRefreshReasons: false,
+            geometryStateShouldHideContainer: false
+        )
+
+        XCTAssertFalse(plan.shouldPreserveVisibleOnTransientGeometry)
+        XCTAssertTrue(plan.shouldApplyPresentationApplicationPlan)
+        XCTAssertTrue(plan.shouldTrackVisibleEntry)
+        XCTAssertTrue(plan.shouldAppendAnchorRefreshReason)
+        XCTAssertTrue(plan.shouldRefreshHostedPresentation)
+    }
+
+    func testVisibleSyncPlanTracksVisibleEntryWithoutTransientLoss() {
+        let presentation = BrowserLifecycleExecutorPresentationApplicationPlan(
+            shouldHideContainer: false,
+            shouldRevealContainer: true,
+            paneTopChromeHeight: 32,
+            shouldShowSearchOverlay: true,
+            shouldShowDropZone: true,
+            shouldRefreshForReveal: true
+        )
+
+        let plan = BrowserLifecycleExecutor.visibleSyncPlan(
+            presentationApplicationPlan: presentation,
+            transientRecoveryPlan: nil,
+            transientRecoveryReason: nil,
+            forcePresentationRefresh: false,
+            hasPendingRefreshReasons: true,
+            geometryStateShouldHideContainer: false
+        )
+
+        XCTAssertFalse(plan.shouldApplyTransientRecoveryPlan)
+        XCTAssertTrue(plan.shouldTrackVisibleEntry)
+        XCTAssertTrue(plan.shouldRefreshHostedPresentation)
+    }
+
     private func makeCurrentBrowserRecord(
         panelId: UUID = UUID(),
         workspaceId: UUID = UUID(),

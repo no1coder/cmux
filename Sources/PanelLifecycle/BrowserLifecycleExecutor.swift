@@ -148,6 +148,37 @@ struct BrowserLifecycleExecutorPresentationApplicationPlan: Sendable {
     let shouldRefreshForReveal: Bool
 }
 
+struct BrowserLifecycleExecutorSynchronizationGeometryState: Sendable {
+    let hostBoundsReady: Bool
+    let hasFiniteFrame: Bool
+    let targetFrame: CGRect
+    let frameWasClamped: Bool
+    let tinyFrame: Bool
+    let outsideHostBounds: Bool
+    let shouldHideContainer: Bool
+    let transientRecoveryReason: BrowserLifecycleExecutorTransientRecoveryReason?
+}
+
+struct BrowserLifecycleExecutorFrameApplicationPlan: Sendable {
+    let shouldUpdateFrame: Bool
+    let shouldNormalizeBounds: Bool
+    let expectedContainerBounds: CGRect
+}
+
+struct BrowserLifecycleExecutorWebFrameNormalizationPlan: Sendable {
+    let shouldNormalizeWebFrame: Bool
+    let normalizedWebFrame: CGRect
+}
+
+struct BrowserLifecycleExecutorVisibleSyncPlan: Sendable {
+    let shouldPreserveVisibleOnTransientGeometry: Bool
+    let shouldApplyPresentationApplicationPlan: Bool
+    let shouldApplyTransientRecoveryPlan: Bool
+    let shouldTrackVisibleEntry: Bool
+    let shouldAppendAnchorRefreshReason: Bool
+    let shouldRefreshHostedPresentation: Bool
+}
+
 enum BrowserLifecycleExecutor {
     static func isCurrentGenerationBoundVisibleReadyForWorkspaceHandoff(
         currentRecord: PanelLifecycleRecordSnapshot,
@@ -535,5 +566,119 @@ enum BrowserLifecycleExecutor {
                 containerHidden &&
                 presentation.shouldShowPaneTopChrome
         )
+    }
+
+    static func synchronizationGeometryState(
+        entryVisibleInUI: Bool,
+        frameInHost: CGRect,
+        hostBounds: CGRect,
+        anchorHidden: Bool
+    ) -> BrowserLifecycleExecutorSynchronizationGeometryState {
+        let hasFiniteHostBounds =
+            hostBounds.origin.x.isFinite &&
+            hostBounds.origin.y.isFinite &&
+            hostBounds.size.width.isFinite &&
+            hostBounds.size.height.isFinite
+        let hostBoundsReady = hasFiniteHostBounds && hostBounds.width > 1 && hostBounds.height > 1
+        let hasFiniteFrame =
+            frameInHost.origin.x.isFinite &&
+            frameInHost.origin.y.isFinite &&
+            frameInHost.size.width.isFinite &&
+            frameInHost.size.height.isFinite
+        let clampedFrame = frameInHost.intersection(hostBounds)
+        let hasVisibleIntersection =
+            !clampedFrame.isNull &&
+            clampedFrame.width > 1 &&
+            clampedFrame.height > 1
+        let targetFrame = hasVisibleIntersection ? clampedFrame : frameInHost
+        let frameWasClamped = hasFiniteFrame && targetFrame != frameInHost
+        let tinyFrame = targetFrame.width <= 1 || targetFrame.height <= 1
+        let outsideHostBounds = !hasVisibleIntersection
+        let shouldHideContainer =
+            !entryVisibleInUI ||
+            anchorHidden ||
+            tinyFrame ||
+            !hasFiniteFrame ||
+            outsideHostBounds
+        return BrowserLifecycleExecutorSynchronizationGeometryState(
+            hostBoundsReady: hostBoundsReady,
+            hasFiniteFrame: hasFiniteFrame,
+            targetFrame: targetFrame,
+            frameWasClamped: frameWasClamped,
+            tinyFrame: tinyFrame,
+            outsideHostBounds: outsideHostBounds,
+            shouldHideContainer: shouldHideContainer,
+            transientRecoveryReason: transientRecoveryReason(
+                entryVisibleInUI: entryVisibleInUI,
+                anchorHidden: anchorHidden,
+                hasFiniteFrame: hasFiniteFrame,
+                outsideHostBounds: outsideHostBounds,
+                tinyFrame: tinyFrame
+            )
+        )
+    }
+
+    static func frameApplicationPlan(
+        oldFrame: CGRect,
+        currentBounds: CGRect,
+        targetFrame: CGRect
+    ) -> BrowserLifecycleExecutorFrameApplicationPlan {
+        let expectedContainerBounds = CGRect(origin: .zero, size: targetFrame.size)
+        return BrowserLifecycleExecutorFrameApplicationPlan(
+            shouldUpdateFrame: !rectApproximatelyEqual(oldFrame, targetFrame),
+            shouldNormalizeBounds: !rectApproximatelyEqual(currentBounds, expectedContainerBounds),
+            expectedContainerBounds: expectedContainerBounds
+        )
+    }
+
+    static func webFrameNormalizationPlan(
+        currentWebFrame: CGRect,
+        containerBounds: CGRect
+    ) -> BrowserLifecycleExecutorWebFrameNormalizationPlan {
+        BrowserLifecycleExecutorWebFrameNormalizationPlan(
+            shouldNormalizeWebFrame: frameExtendsOutsideBounds(currentWebFrame, bounds: containerBounds),
+            normalizedWebFrame: containerBounds
+        )
+    }
+
+    static func visibleSyncPlan(
+        presentationApplicationPlan: BrowserLifecycleExecutorPresentationApplicationPlan,
+        transientRecoveryPlan: BrowserLifecycleExecutorTransientRecoveryPlan?,
+        transientRecoveryReason: BrowserLifecycleExecutorTransientRecoveryReason?,
+        forcePresentationRefresh: Bool,
+        hasPendingRefreshReasons: Bool,
+        geometryStateShouldHideContainer: Bool
+    ) -> BrowserLifecycleExecutorVisibleSyncPlan {
+        let shouldPreserveVisibleOnTransientGeometry =
+            transientRecoveryPlan?.shouldPreserveVisible == true &&
+            geometryStateShouldHideContainer
+        let shouldAppendAnchorRefreshReason = forcePresentationRefresh
+        let shouldRefreshHostedPresentation =
+            !presentationApplicationPlan.shouldHideContainer &&
+            (hasPendingRefreshReasons || shouldAppendAnchorRefreshReason)
+        return BrowserLifecycleExecutorVisibleSyncPlan(
+            shouldPreserveVisibleOnTransientGeometry: shouldPreserveVisibleOnTransientGeometry,
+            shouldApplyPresentationApplicationPlan: !shouldPreserveVisibleOnTransientGeometry,
+            shouldApplyTransientRecoveryPlan:
+                transientRecoveryReason != nil &&
+                presentationApplicationPlan.shouldHideContainer,
+            shouldTrackVisibleEntry: transientRecoveryReason == nil,
+            shouldAppendAnchorRefreshReason: shouldAppendAnchorRefreshReason,
+            shouldRefreshHostedPresentation: shouldRefreshHostedPresentation
+        )
+    }
+
+    private static func rectApproximatelyEqual(_ lhs: CGRect, _ rhs: CGRect, tolerance: CGFloat = 0.5) -> Bool {
+        abs(lhs.origin.x - rhs.origin.x) <= tolerance &&
+            abs(lhs.origin.y - rhs.origin.y) <= tolerance &&
+            abs(lhs.size.width - rhs.size.width) <= tolerance &&
+            abs(lhs.size.height - rhs.size.height) <= tolerance
+    }
+
+    private static func frameExtendsOutsideBounds(_ frame: CGRect, bounds: CGRect) -> Bool {
+        frame.minX < bounds.minX ||
+            frame.minY < bounds.minY ||
+            frame.maxX > bounds.maxX ||
+            frame.maxY > bounds.maxY
     }
 }

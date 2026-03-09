@@ -161,6 +161,15 @@ struct TerminalLifecycleExecutorFrameGeometryApplicationPlan: Sendable {
     let refreshReason: TerminalLifecycleExecutorGeometryRefreshReason?
 }
 
+struct TerminalLifecycleExecutorSynchronizationGeometryState: Sendable {
+    let hostBoundsReady: Bool
+    let hasFiniteFrame: Bool
+    let targetFrame: NSRect
+    let tinyFrame: Bool
+    let revealReadyForDisplay: Bool
+    let outsideHostBounds: Bool
+}
+
 struct TerminalLifecycleExecutorRevealApplicationPlan: Sendable {
     let shouldRevealHostedView: Bool
     let shouldReconcileGeometry: Bool
@@ -613,6 +622,48 @@ enum TerminalLifecycleExecutor {
             shouldApplyBounds: shouldApplyBounds,
             shouldReconcileGeometry: shouldApplyFrame,
             refreshReason: shouldApplyFrame ? .portalFrameChange : nil
+        )
+    }
+
+    static func synchronizationGeometryState(
+        frameInHost: NSRect,
+        hostBounds: NSRect,
+        tinyHideThreshold: CGFloat,
+        minimumRevealWidth: CGFloat,
+        minimumRevealHeight: CGFloat
+    ) -> TerminalLifecycleExecutorSynchronizationGeometryState {
+        let hasFiniteHostBounds =
+            hostBounds.origin.x.isFinite &&
+            hostBounds.origin.y.isFinite &&
+            hostBounds.size.width.isFinite &&
+            hostBounds.size.height.isFinite
+        let hostBoundsReady = hasFiniteHostBounds && hostBounds.width > 1 && hostBounds.height > 1
+        let hasFiniteFrame =
+            frameInHost.origin.x.isFinite &&
+            frameInHost.origin.y.isFinite &&
+            frameInHost.size.width.isFinite &&
+            frameInHost.size.height.isFinite
+        let clampedFrame = frameInHost.intersection(hostBounds)
+        let hasVisibleIntersection =
+            !clampedFrame.isNull &&
+            clampedFrame.width > 1 &&
+            clampedFrame.height > 1
+        let targetFrame = (hasFiniteFrame && hasVisibleIntersection) ? clampedFrame : frameInHost
+        let tinyFrame =
+            targetFrame.width <= tinyHideThreshold ||
+            targetFrame.height <= tinyHideThreshold
+        let revealReadyForDisplay =
+            targetFrame.width >= minimumRevealWidth &&
+            targetFrame.height >= minimumRevealHeight
+        let outsideHostBounds = !hasVisibleIntersection
+
+        return TerminalLifecycleExecutorSynchronizationGeometryState(
+            hostBoundsReady: hostBoundsReady,
+            hasFiniteFrame: hasFiniteFrame,
+            targetFrame: targetFrame,
+            tinyFrame: tinyFrame,
+            revealReadyForDisplay: revealReadyForDisplay,
+            outsideHostBounds: outsideHostBounds
         )
     }
 

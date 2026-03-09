@@ -1039,22 +1039,14 @@ final class WindowTerminalPortal: NSObject {
         let bindSeedPlan = TerminalLifecycleExecutor.bindSeedPlan(
             seededFrame: seededFrame
         )
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        hostedView.frame = bindSeedPlan.frame
-        hostedView.bounds = bindSeedPlan.bounds
-        CATransaction.commit()
-
-        if bindSeedPlan.shouldHideHostedView {
-            // If anchor geometry is still unsettled, keep this hidden/zero-sized until
-            // synchronizeHostedView resolves a valid target frame on the next layout tick.
-            hostedView.isHidden = true
-        }
+        // If anchor geometry is still unsettled, keep this hidden/zero-sized until
+        // synchronizeHostedView resolves a valid target frame on the next layout tick.
         // Keep inner scroll/surface geometry in sync with the seeded outer frame
         // before the hosted view enters a window.
-        if bindSeedPlan.shouldReconcileGeometry {
-            hostedView.reconcileGeometryNow()
-        }
+        applyBindSeedPlan(
+            hostedView: hostedView,
+            bindSeedPlan: bindSeedPlan
+        )
 
         if hostedView.superview !== hostView {
 #if DEBUG
@@ -1123,257 +1115,94 @@ final class WindowTerminalPortal: NSObject {
         }
     }
 
-    private func synchronizeHostedView(withId hostedId: ObjectIdentifier) {
-        guard ensureInstalled() else { return }
-        guard let entry = entriesByHostedId[hostedId] else { return }
-        guard let hostedView = entry.hostedView else {
-            entriesByHostedId.removeValue(forKey: hostedId)
-            return
-        }
-        guard let anchorView = entry.anchorView, let window else {
-            let transientLossPlan = TerminalLifecycleExecutor.transientLossPlan(
-                context: TerminalLifecycleExecutorTransientRecoveryContext(
-                    transientRecoveryEnabled: false,
-                    targetVisible: entry.visibleInUI,
-                    missingAnchorOrWindow: true,
-                    anchorWindowMismatch: false,
-                    hostBoundsNotReady: false,
-                    anchorHidden: false,
-                    hasFiniteFrame: true,
-                    outsideHostBounds: false,
-                    tinyFrame: false,
-                    shouldDeferReveal: false
-                ),
-                hostedHidden: hostedView.isHidden
-            )
-            let transientApplicationPlan = transientLossPlan.applicationPlan(
-                didScheduleTransientRecovery: false
-            )
-            if transientApplicationPlan.hiddenStateAction == .preserveVisible {
-#if DEBUG
-                portalHotPathDlog(
-                    "portal.hidden.deferKeep hosted=\(portalDebugToken(hostedView)) " +
-                    "reason=missingAnchorOrWindow frame=\(portalDebugFrame(hostedView.frame))"
-                )
-#endif
-                return
-            }
-#if DEBUG
-            if !hostedView.isHidden {
-                portalHotPathDlog(
-                    "portal.hidden hosted=\(portalDebugToken(hostedView)) value=1 reason=missingAnchorOrWindow"
-                )
-            }
-#endif
-            switch transientApplicationPlan.hiddenStateAction {
-            case .preserveVisible:
-                return
-            case .hideHostedView:
-                hostedView.isHidden = true
-            case .unmountHostedView:
-                unmountHostedViewIfNeeded(hostedView)
-            }
-            if case .retry = transientApplicationPlan.followUpAction {
-                scheduleDeferredFullSynchronizeAll()
-            } else if case .deferredFullSynchronize = transientApplicationPlan.followUpAction {
-                scheduleDeferredFullSynchronizeAll()
-            }
-            return
-        }
-        guard anchorView.window === window else {
-            let transientLossPlan = TerminalLifecycleExecutor.transientLossPlan(
-                context: TerminalLifecycleExecutorTransientRecoveryContext(
-                    transientRecoveryEnabled: false,
-                    targetVisible: entry.visibleInUI,
-                    missingAnchorOrWindow: false,
-                    anchorWindowMismatch: true,
-                    hostBoundsNotReady: false,
-                    anchorHidden: false,
-                    hasFiniteFrame: true,
-                    outsideHostBounds: false,
-                    tinyFrame: false,
-                    shouldDeferReveal: false
-                ),
-                hostedHidden: hostedView.isHidden
-            )
-            let transientApplicationPlan = transientLossPlan.applicationPlan(
-                didScheduleTransientRecovery: false
-            )
-#if DEBUG
-            if !hostedView.isHidden {
-                portalHotPathDlog(
-                    "portal.hidden hosted=\(portalDebugToken(hostedView)) value=1 " +
-                    "reason=anchorWindowMismatch anchorWindow=\(portalDebugToken(anchorView.window?.contentView))"
-                )
-            }
-#endif
-            if transientApplicationPlan.hiddenStateAction == .preserveVisible {
-#if DEBUG
-                portalHotPathDlog(
-                    "portal.hidden.deferKeep hosted=\(portalDebugToken(hostedView)) " +
-                    "reason=anchorWindowMismatch frame=\(portalDebugFrame(hostedView.frame))"
-                )
-#endif
-                return
-            }
-            switch transientApplicationPlan.hiddenStateAction {
-            case .preserveVisible:
-                return
-            case .hideHostedView:
-                hostedView.isHidden = true
-            case .unmountHostedView:
-                unmountHostedViewIfNeeded(hostedView)
-            }
-            if case .retry = transientApplicationPlan.followUpAction {
-                scheduleDeferredFullSynchronizeAll()
-            } else if case .deferredFullSynchronize = transientApplicationPlan.followUpAction {
-                scheduleDeferredFullSynchronizeAll()
-            }
-            return
-        }
-        _ = synchronizeHostFrameToReference()
-        let frameInWindow = effectiveAnchorFrameInWindow(for: anchorView)
-        let frameInHostRaw = hostView.convert(frameInWindow, from: nil)
-        let frameInHost = Self.pixelSnappedRect(frameInHostRaw, in: hostView)
-        let hostBounds = hostView.bounds
-        let hasFiniteHostBounds =
-            hostBounds.origin.x.isFinite &&
-            hostBounds.origin.y.isFinite &&
-            hostBounds.size.width.isFinite &&
-            hostBounds.size.height.isFinite
-        let hostBoundsReady = hasFiniteHostBounds && hostBounds.width > 1 && hostBounds.height > 1
-        let hasFiniteFrame =
-            frameInHost.origin.x.isFinite &&
-            frameInHost.origin.y.isFinite &&
-            frameInHost.size.width.isFinite &&
-            frameInHost.size.height.isFinite
-        let clampedFrame = frameInHost.intersection(hostBounds)
-        let hasVisibleIntersection =
-            !clampedFrame.isNull &&
-            clampedFrame.width > 1 &&
-            clampedFrame.height > 1
-        let targetFrame = (hasFiniteFrame && hasVisibleIntersection) ? clampedFrame : frameInHost
-        let anchorHidden = Self.isHiddenOrAncestorHidden(anchorView)
-        let tinyFrame =
-            targetFrame.width <= Self.tinyHideThreshold ||
-            targetFrame.height <= Self.tinyHideThreshold
-        let revealReadyForDisplay =
-            targetFrame.width >= Self.minimumRevealWidth &&
-            targetFrame.height >= Self.minimumRevealHeight
-        let outsideHostBounds = !hasVisibleIntersection
-        let geometry = SynchronizationGeometrySnapshot(
-            frameInHost: frameInHost,
-            hostBounds: hostBounds,
-            hostBoundsReady: hostBoundsReady,
-            hasFiniteFrame: hasFiniteFrame,
-            targetFrame: targetFrame,
-            anchorHidden: anchorHidden,
-            tinyFrame: tinyFrame,
-            revealReadyForDisplay: revealReadyForDisplay,
-            outsideHostBounds: outsideHostBounds
+    @discardableResult
+    private func applyTransientLossState(
+        hostedView: GhosttySurfaceScrollView,
+        context: TerminalLifecycleExecutorTransientRecoveryContext,
+        preserveReason: String,
+        hideLogMessage: String? = nil
+    ) -> Bool {
+        let transientLossPlan = TerminalLifecycleExecutor.transientLossPlan(
+            context: context,
+            hostedHidden: hostedView.isHidden
         )
-#if DEBUG
-        if portalHotPathDebugLogsEnabled() {
-            var currentContainer: NSView? = anchorView
-            while let view = currentContainer {
-                let className = NSStringFromClass(type(of: view))
-                if className.contains("PaneDragContainerView") || className.contains("Bonsplit") {
-                    currentContainer = view
-                    break
-                }
-                currentContainer = view.superview
-            }
-            if currentContainer == nil {
-                currentContainer = installedReferenceView
-            }
-            if let container = currentContainer {
-                let containerFrame = container.convert(container.bounds, to: nil)
-                let signature = "\(ObjectIdentifier(container)):\(portalDebugFrame(containerFrame))"
-                if signature != lastLoggedBonsplitContainerSignature {
-                    lastLoggedBonsplitContainerSignature = signature
-                    let containerClass = NSStringFromClass(type(of: container))
-                    portalHotPathDlog(
-                        "portal.bonsplit.container hosted=\(portalDebugToken(hostedView)) " +
-                        "class=\(containerClass) frame=\(portalDebugFrame(containerFrame)) " +
-                        "host=\(portalDebugFrameInWindow(hostView)) anchor=\(portalDebugFrameInWindow(anchorView))"
-                    )
-                }
-            }
-        }
-#endif
-        if !geometry.hostBoundsReady {
-            let transientLossPlan = TerminalLifecycleExecutor.transientLossPlan(
-                context: TerminalLifecycleExecutorTransientRecoveryContext(
-                    transientRecoveryEnabled: false,
-                    targetVisible: entry.visibleInUI,
-                    missingAnchorOrWindow: false,
-                    anchorWindowMismatch: false,
-                    hostBoundsNotReady: true,
-                    anchorHidden: geometry.anchorHidden,
-                    hasFiniteFrame: geometry.hasFiniteFrame,
-                    outsideHostBounds: geometry.outsideHostBounds,
-                    tinyFrame: geometry.tinyFrame,
-                    shouldDeferReveal: !geometry.revealReadyForDisplay
-                ),
-                hostedHidden: hostedView.isHidden
-            )
-            let transientApplicationPlan = transientLossPlan.applicationPlan(
-                didScheduleTransientRecovery: false
-            )
-#if DEBUG
-            portalHotPathDlog(
-                "portal.sync.defer hosted=\(portalDebugToken(hostedView)) " +
-                "reason=hostBoundsNotReady host=\(portalDebugFrame(geometry.hostBounds)) " +
-                "anchor=\(portalDebugFrame(geometry.frameInHost)) visibleInUI=\(entry.visibleInUI ? 1 : 0)"
-            )
-#endif
-            if transientApplicationPlan.hiddenStateAction == .preserveVisible {
-#if DEBUG
-                portalHotPathDlog(
-                    "portal.hidden.deferKeep hosted=\(portalDebugToken(hostedView)) " +
-                    "reason=hostBoundsNotReady frame=\(portalDebugFrame(hostedView.frame))"
-                )
-#endif
-                return
-            }
-            switch transientApplicationPlan.hiddenStateAction {
-            case .preserveVisible:
-                return
-            case .hideHostedView:
-                hostedView.isHidden = true
-            case .unmountHostedView:
-                unmountHostedViewIfNeeded(hostedView)
-            }
-            if case .retry = transientApplicationPlan.followUpAction {
-                scheduleDeferredFullSynchronizeAll()
-            } else if case .deferredFullSynchronize = transientApplicationPlan.followUpAction {
-                scheduleDeferredFullSynchronizeAll()
-            }
-            return
-        }
-        let oldFrame = hostedView.frame
-        let frameLossPlan = TerminalLifecycleExecutor.frameLossPlan(
-            context: TerminalLifecycleExecutorFrameVisibilityContext(
-                transientRecoveryEnabled: false,
-                targetVisible: entry.visibleInUI,
-                hostedHidden: hostedView.isHidden,
-                anchorHidden: geometry.anchorHidden,
-                hasFiniteFrame: geometry.hasFiniteFrame,
-                outsideHostBounds: geometry.outsideHostBounds,
-                tinyFrame: geometry.tinyFrame,
-                revealReadyForDisplay: geometry.revealReadyForDisplay
-            )
-        )
-        let frameApplicationPlan = frameLossPlan.applicationPlan(
+        let transientApplicationPlan = transientLossPlan.applicationPlan(
             didScheduleTransientRecovery: false
         )
+
+        if transientApplicationPlan.hiddenStateAction == .preserveVisible {
+#if DEBUG
+            portalHotPathDlog(
+                "portal.hidden.deferKeep hosted=\(portalDebugToken(hostedView)) " +
+                "reason=\(preserveReason) frame=\(portalDebugFrame(hostedView.frame))"
+            )
+#endif
+            return true
+        }
+
+#if DEBUG
+        if let hideLogMessage, !hostedView.isHidden {
+            portalHotPathDlog(hideLogMessage)
+        }
+#endif
+
+        switch transientApplicationPlan.hiddenStateAction {
+        case .preserveVisible:
+            return true
+        case .hideHostedView:
+            hostedView.isHidden = true
+        case .unmountHostedView:
+            unmountHostedViewIfNeeded(hostedView)
+        }
+
+        switch transientApplicationPlan.followUpAction {
+        case .none:
+            break
+        case .retry, .deferredFullSynchronize:
+            scheduleDeferredFullSynchronizeAll()
+        }
+        return true
+    }
+
+    private func transientRecoveryContext(
+        targetVisible: Bool,
+        missingAnchorOrWindow: Bool,
+        anchorWindowMismatch: Bool,
+        hostBoundsNotReady: Bool,
+        anchorHidden: Bool,
+        hasFiniteFrame: Bool,
+        outsideHostBounds: Bool,
+        tinyFrame: Bool,
+        shouldDeferReveal: Bool
+    ) -> TerminalLifecycleExecutorTransientRecoveryContext {
+        TerminalLifecycleExecutorTransientRecoveryContext(
+            transientRecoveryEnabled: false,
+            targetVisible: targetVisible,
+            missingAnchorOrWindow: missingAnchorOrWindow,
+            anchorWindowMismatch: anchorWindowMismatch,
+            hostBoundsNotReady: hostBoundsNotReady,
+            anchorHidden: anchorHidden,
+            hasFiniteFrame: hasFiniteFrame,
+            outsideHostBounds: outsideHostBounds,
+            tinyFrame: tinyFrame,
+            shouldDeferReveal: shouldDeferReveal
+        )
+    }
+
+    private func applyFrameApplicationPlan(
+        hostedView: GhosttySurfaceScrollView,
+        visibleInUI: Bool,
+        geometry: SynchronizationGeometrySnapshot,
+        oldFrame: NSRect,
+        frameApplicationPlan: TerminalLifecycleExecutorFrameApplicationPlan
+    ) {
         if frameApplicationPlan.shouldHide,
            !hostedView.isHidden,
            frameApplicationPlan.hiddenStateAction != .preserveVisible {
 #if DEBUG
             portalHotPathDlog(
                 "portal.hidden hosted=\(portalDebugToken(hostedView)) value=1 " +
-                "visibleInUI=\(entry.visibleInUI ? 1 : 0) anchorHidden=\(geometry.anchorHidden ? 1 : 0) " +
+                "visibleInUI=\(visibleInUI ? 1 : 0) anchorHidden=\(geometry.anchorHidden ? 1 : 0) " +
                 "tiny=\(geometry.tinyFrame ? 1 : 0) revealReady=\(geometry.revealReadyForDisplay ? 1 : 0) finite=\(geometry.hasFiniteFrame ? 1 : 0) " +
                 "outside=\(geometry.outsideHostBounds ? 1 : 0) frame=\(portalDebugFrame(geometry.targetFrame)) " +
                 "host=\(portalDebugFrame(geometry.hostBounds))"
@@ -1388,6 +1217,7 @@ final class WindowTerminalPortal: NSObject {
                 unmountHostedViewIfNeeded(hostedView)
             }
         }
+
         if frameApplicationPlan.hiddenStateAction == .preserveVisible {
 #if DEBUG
             portalHotPathDlog(
@@ -1416,7 +1246,7 @@ final class WindowTerminalPortal: NSObject {
 #if DEBUG
             portalHotPathDlog(
                 "portal.hidden hosted=\(portalDebugToken(hostedView)) value=0 " +
-                "visibleInUI=\(entry.visibleInUI ? 1 : 0) anchorHidden=\(geometry.anchorHidden ? 1 : 0) " +
+                "visibleInUI=\(visibleInUI ? 1 : 0) anchorHidden=\(geometry.anchorHidden ? 1 : 0) " +
                 "tiny=\(geometry.tinyFrame ? 1 : 0) revealReady=\(geometry.revealReadyForDisplay ? 1 : 0) finite=\(geometry.hasFiniteFrame ? 1 : 0) " +
                 "outside=\(geometry.outsideHostBounds ? 1 : 0) frame=\(portalDebugFrame(geometry.targetFrame)) " +
                 "host=\(portalDebugFrame(geometry.hostBounds))"
@@ -1430,18 +1260,35 @@ final class WindowTerminalPortal: NSObject {
                 hostedView.refreshSurfaceNow(reason: refreshReason.rawValue)
             }
         }
+    }
 
-        let geometryApplicationPlan = TerminalLifecycleExecutor.frameGeometryApplicationPlan(
-            hasFiniteFrame: geometry.hasFiniteFrame,
-            oldFrame: oldFrame,
-            targetFrame: geometry.targetFrame,
-            currentBounds: hostedView.bounds
-        )
+    private func applyBindSeedPlan(
+        hostedView: GhosttySurfaceScrollView,
+        bindSeedPlan: TerminalLifecycleExecutorBindSeedPlan
+    ) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        hostedView.frame = bindSeedPlan.frame
+        hostedView.bounds = bindSeedPlan.bounds
+        CATransaction.commit()
 
+        if bindSeedPlan.shouldHideHostedView {
+            hostedView.isHidden = true
+        }
+        if bindSeedPlan.shouldReconcileGeometry {
+            hostedView.reconcileGeometryNow()
+        }
+    }
+
+    private func applyGeometryApplicationPlan(
+        hostedView: GhosttySurfaceScrollView,
+        targetFrame: NSRect,
+        geometryApplicationPlan: TerminalLifecycleExecutorFrameGeometryApplicationPlan
+    ) {
         if geometryApplicationPlan.shouldApplyFrame {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            hostedView.frame = geometry.targetFrame
+            hostedView.frame = targetFrame
             CATransaction.commit()
             if geometryApplicationPlan.shouldReconcileGeometry {
                 hostedView.reconcileGeometryNow()
@@ -1452,21 +1299,141 @@ final class WindowTerminalPortal: NSObject {
         }
 
         if geometryApplicationPlan.shouldApplyBounds {
-            let expectedBounds = NSRect(origin: .zero, size: geometry.targetFrame.size)
+            let expectedBounds = NSRect(origin: .zero, size: targetFrame.size)
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             hostedView.bounds = expectedBounds
             CATransaction.commit()
         }
+    }
+
+    private func synchronizeReadyAnchorHostedView(
+        entry: Entry,
+        hostedView: GhosttySurfaceScrollView,
+        anchorView: NSView
+    ) {
+        _ = synchronizeHostFrameToReference()
+        let frameInWindow = effectiveAnchorFrameInWindow(for: anchorView)
+        let frameInHostRaw = hostView.convert(frameInWindow, from: nil)
+        let frameInHost = Self.pixelSnappedRect(frameInHostRaw, in: hostView)
+        let hostBounds = hostView.bounds
+        let geometryState = TerminalLifecycleExecutor.synchronizationGeometryState(
+            frameInHost: frameInHost,
+            hostBounds: hostBounds,
+            tinyHideThreshold: Self.tinyHideThreshold,
+            minimumRevealWidth: Self.minimumRevealWidth,
+            minimumRevealHeight: Self.minimumRevealHeight
+        )
+        let anchorHidden = Self.isHiddenOrAncestorHidden(anchorView)
+        let geometry = SynchronizationGeometrySnapshot(
+            frameInHost: frameInHost,
+            hostBounds: hostBounds,
+            hostBoundsReady: geometryState.hostBoundsReady,
+            hasFiniteFrame: geometryState.hasFiniteFrame,
+            targetFrame: geometryState.targetFrame,
+            anchorHidden: anchorHidden,
+            tinyFrame: geometryState.tinyFrame,
+            revealReadyForDisplay: geometryState.revealReadyForDisplay,
+            outsideHostBounds: geometryState.outsideHostBounds
+        )
+#if DEBUG
+        if portalHotPathDebugLogsEnabled() {
+            var currentContainer: NSView? = anchorView
+            while let view = currentContainer {
+                let className = NSStringFromClass(type(of: view))
+                if className.contains("PaneDragContainerView") || className.contains("Bonsplit") {
+                    currentContainer = view
+                    break
+                }
+                currentContainer = view.superview
+            }
+            if currentContainer == nil {
+                currentContainer = installedReferenceView
+            }
+            if let container = currentContainer {
+                let containerFrame = container.convert(container.bounds, to: nil)
+                let signature = "\(ObjectIdentifier(container)):\(portalDebugFrame(containerFrame))"
+                if signature != lastLoggedBonsplitContainerSignature {
+                    lastLoggedBonsplitContainerSignature = signature
+                    let containerClass = NSStringFromClass(type(of: container))
+                    portalHotPathDlog(
+                        "portal.bonsplit.container hosted=\(portalDebugToken(hostedView)) " +
+                            "class=\(containerClass) frame=\(portalDebugFrame(containerFrame)) " +
+                            "host=\(portalDebugFrameInWindow(hostView)) anchor=\(portalDebugFrameInWindow(anchorView))"
+                    )
+                }
+            }
+        }
+#endif
+        if !geometry.hostBoundsReady {
+#if DEBUG
+            portalHotPathDlog(
+                "portal.sync.defer hosted=\(portalDebugToken(hostedView)) " +
+                    "reason=hostBoundsNotReady host=\(portalDebugFrame(geometry.hostBounds)) " +
+                    "anchor=\(portalDebugFrame(geometry.frameInHost)) visibleInUI=\(entry.visibleInUI ? 1 : 0)"
+            )
+#endif
+            _ = applyTransientLossState(
+                hostedView: hostedView,
+                context: transientRecoveryContext(
+                    targetVisible: entry.visibleInUI,
+                    missingAnchorOrWindow: false,
+                    anchorWindowMismatch: false,
+                    hostBoundsNotReady: true,
+                    anchorHidden: geometry.anchorHidden,
+                    hasFiniteFrame: geometry.hasFiniteFrame,
+                    outsideHostBounds: geometry.outsideHostBounds,
+                    tinyFrame: geometry.tinyFrame,
+                    shouldDeferReveal: !geometry.revealReadyForDisplay
+                ),
+                preserveReason: "hostBoundsNotReady"
+            )
+            return
+        }
+        let oldFrame = hostedView.frame
+        let frameLossPlan = TerminalLifecycleExecutor.frameLossPlan(
+            context: TerminalLifecycleExecutorFrameVisibilityContext(
+                transientRecoveryEnabled: false,
+                targetVisible: entry.visibleInUI,
+                hostedHidden: hostedView.isHidden,
+                anchorHidden: geometry.anchorHidden,
+                hasFiniteFrame: geometry.hasFiniteFrame,
+                outsideHostBounds: geometry.outsideHostBounds,
+                tinyFrame: geometry.tinyFrame,
+                revealReadyForDisplay: geometry.revealReadyForDisplay
+            )
+        )
+        let frameApplicationPlan = frameLossPlan.applicationPlan(
+            didScheduleTransientRecovery: false
+        )
+        applyFrameApplicationPlan(
+            hostedView: hostedView,
+            visibleInUI: entry.visibleInUI,
+            geometry: geometry,
+            oldFrame: oldFrame,
+            frameApplicationPlan: frameApplicationPlan
+        )
+
+        let geometryApplicationPlan = TerminalLifecycleExecutor.frameGeometryApplicationPlan(
+            hasFiniteFrame: geometry.hasFiniteFrame,
+            oldFrame: oldFrame,
+            targetFrame: geometry.targetFrame,
+            currentBounds: hostedView.bounds
+        )
+        applyGeometryApplicationPlan(
+            hostedView: hostedView,
+            targetFrame: geometry.targetFrame,
+            geometryApplicationPlan: geometryApplicationPlan
+        )
 #if DEBUG
         let frameWasClamped = geometry.hasFiniteFrame
             && !Self.rectApproximatelyEqual(geometry.frameInHost, geometry.targetFrame)
         if frameWasClamped {
             portalHotPathDlog(
                 "portal.frame.clamp hosted=\(portalDebugToken(hostedView)) " +
-                "anchor=\(portalDebugToken(anchorView)) " +
-                "raw=\(portalDebugFrame(geometry.frameInHost)) clamped=\(portalDebugFrame(geometry.targetFrame)) " +
-                "host=\(portalDebugFrame(geometry.hostBounds))"
+                    "anchor=\(portalDebugToken(anchorView)) " +
+                    "raw=\(portalDebugFrame(geometry.frameInHost)) clamped=\(portalDebugFrame(geometry.targetFrame)) " +
+                    "host=\(portalDebugFrame(geometry.hostBounds))"
             )
         }
         let collapsedToTiny = oldFrame.width > 1
@@ -1477,27 +1444,88 @@ final class WindowTerminalPortal: NSObject {
         if collapsedToTiny {
             portalHotPathDlog(
                 "portal.frame.collapse hosted=\(portalDebugToken(hostedView)) anchor=\(portalDebugToken(anchorView)) " +
-                "old=\(portalDebugFrame(oldFrame)) new=\(portalDebugFrame(geometry.targetFrame))"
+                    "old=\(portalDebugFrame(oldFrame)) new=\(portalDebugFrame(geometry.targetFrame))"
             )
         } else if restoredFromTiny {
             portalHotPathDlog(
                 "portal.frame.restore hosted=\(portalDebugToken(hostedView)) anchor=\(portalDebugToken(anchorView)) " +
-                "old=\(portalDebugFrame(oldFrame)) new=\(portalDebugFrame(geometry.targetFrame))"
+                    "old=\(portalDebugFrame(oldFrame)) new=\(portalDebugFrame(geometry.targetFrame))"
             )
         }
         if ProcessInfo.processInfo.environment["CMUX_HOT_PATH_DEBUG_LOGS"] == "1" {
             dlog(
                 "portal.sync.result hosted=\(portalDebugToken(hostedView)) " +
-                "anchor=\(portalDebugToken(anchorView)) host=\(portalDebugToken(hostView)) " +
-                "hostWin=\(hostView.window?.windowNumber ?? -1) " +
-                "old=\(portalDebugFrame(oldFrame)) raw=\(portalDebugFrame(geometry.frameInHost)) " +
-                "target=\(portalDebugFrame(geometry.targetFrame)) hide=\(frameApplicationPlan.shouldHide ? 1 : 0) " +
-                "entryVisible=\(entry.visibleInUI ? 1 : 0) hostedHidden=\(hostedView.isHidden ? 1 : 0) " +
-                "hostBounds=\(portalDebugFrame(geometry.hostBounds))"
+                    "anchor=\(portalDebugToken(anchorView)) host=\(portalDebugToken(hostView)) " +
+                    "hostWin=\(hostView.window?.windowNumber ?? -1) " +
+                    "old=\(portalDebugFrame(oldFrame)) raw=\(portalDebugFrame(geometry.frameInHost)) " +
+                    "target=\(portalDebugFrame(geometry.targetFrame)) hide=\(frameApplicationPlan.shouldHide ? 1 : 0) " +
+                    "entryVisible=\(entry.visibleInUI ? 1 : 0) hostedHidden=\(hostedView.isHidden ? 1 : 0) " +
+                    "hostBounds=\(portalDebugFrame(geometry.hostBounds))"
             )
         }
 #endif
         ensureDividerOverlayOnTop()
+    }
+
+    @discardableResult
+    private func applyUnavailableAnchorState(
+        entry: Entry,
+        hostedView: GhosttySurfaceScrollView,
+        missingAnchorOrWindow: Bool,
+        anchorWindowMismatch: Bool,
+        hideLogMessage: String
+    ) -> Bool {
+        applyTransientLossState(
+            hostedView: hostedView,
+            context: transientRecoveryContext(
+                targetVisible: entry.visibleInUI,
+                missingAnchorOrWindow: missingAnchorOrWindow,
+                anchorWindowMismatch: anchorWindowMismatch,
+                hostBoundsNotReady: false,
+                anchorHidden: false,
+                hasFiniteFrame: true,
+                outsideHostBounds: false,
+                tinyFrame: false,
+                shouldDeferReveal: false
+            ),
+            preserveReason: missingAnchorOrWindow ? "missingAnchorOrWindow" : "anchorWindowMismatch",
+            hideLogMessage: hideLogMessage
+        )
+    }
+
+    private func synchronizeHostedView(withId hostedId: ObjectIdentifier) {
+        guard ensureInstalled() else { return }
+        guard let entry = entriesByHostedId[hostedId] else { return }
+        guard let hostedView = entry.hostedView else {
+            entriesByHostedId.removeValue(forKey: hostedId)
+            return
+        }
+        guard let anchorView = entry.anchorView, let window else {
+            _ = applyUnavailableAnchorState(
+                entry: entry,
+                hostedView: hostedView,
+                missingAnchorOrWindow: true,
+                anchorWindowMismatch: false,
+                hideLogMessage: "portal.hidden hosted=\(portalDebugToken(hostedView)) value=1 reason=missingAnchorOrWindow"
+            )
+            return
+        }
+        guard anchorView.window === window else {
+            _ = applyUnavailableAnchorState(
+                entry: entry,
+                hostedView: hostedView,
+                missingAnchorOrWindow: false,
+                anchorWindowMismatch: true,
+                hideLogMessage: "portal.hidden hosted=\(portalDebugToken(hostedView)) value=1 " +
+                    "reason=anchorWindowMismatch anchorWindow=\(portalDebugToken(anchorView.window?.contentView))"
+            )
+            return
+        }
+        synchronizeReadyAnchorHostedView(
+            entry: entry,
+            hostedView: hostedView,
+            anchorView: anchorView
+        )
     }
 
     private func pruneDeadEntries() {
