@@ -117,19 +117,26 @@ final class BrowserLifecycleDragUITests: XCTestCase {
             return
         }
 
+        let lifecycleMatch = waitForLifecycleSnapshot(timeout: 8.0) { snapshot in
+            guard let moved = snapshot.records.first(where: {
+                $0.panelId == browserPanelId && $0.workspaceId == destinationWorkspaceId
+            }) else {
+                return false
+            }
+            return moved.selectedWorkspace &&
+                moved.activeWindowMembership &&
+                moved.desiredVisible &&
+                moved.targetResidency == "visibleInActiveWindow"
+        }
+        let debugSnapshot = latestLifecycleSnapshot()
+        let debugMoved = debugSnapshot?.records.first(where: {
+            $0.panelId == browserPanelId && $0.workspaceId == destinationWorkspaceId
+        })
         XCTAssertTrue(
-            waitForLifecycleSnapshot(timeout: 8.0) { snapshot in
-                guard let moved = snapshot.records.first(where: {
-                    $0.panelId == browserPanelId && $0.workspaceId == destinationWorkspaceId
-                }) else {
-                    return false
-                }
-                return moved.selectedWorkspace &&
-                    moved.activeWindowMembership &&
-                    moved.desiredVisible &&
-                    moved.targetResidency == "visibleInActiveWindow"
-            },
-            "Expected moved browser to remain visible in the active workspace after cross-workspace move"
+            lifecycleMatch,
+            "Expected moved browser to remain visible in the active workspace after cross-workspace move. " +
+                "snapshot=\(debugSnapshot?.debugSummary ?? "nil") " +
+                "moved=\(debugMoved?.debugSummary ?? "nil")"
         )
 
         guard let snapshot = latestLifecycleSnapshot(),
@@ -260,28 +267,39 @@ final class BrowserLifecycleDragUITests: XCTestCase {
 private struct BrowserLifecycleRecord {
     let panelId: String
     let workspaceId: String
+    let state: String
+    let residency: String
     let selectedWorkspace: Bool
     let activeWindowMembership: Bool
     let desiredVisible: Bool
+    let desiredActive: Bool
     let targetResidency: String
+    let targetWindowNumber: Int
+}
+
+extension BrowserLifecycleRecord {
+    var debugSummary: String {
+        "panelId=\(panelId) workspaceId=\(workspaceId) state=\(state) residency=\(residency) " +
+            "selectedWorkspace=\(selectedWorkspace) activeWindowMembership=\(activeWindowMembership) " +
+            "desiredVisible=\(desiredVisible) desiredActive=\(desiredActive) " +
+            "targetResidency=\(targetResidency) targetWindowNumber=\(targetWindowNumber)"
+    }
 }
 
 private struct BrowserLifecycleSnapshot {
+    let activeWindowNumber: Int
+    let selectedWorkspaceId: String
     let records: [BrowserLifecycleRecord]
 
     init?(result: [String: Any]) {
+        activeWindowNumber = result["activeWindowNumber"] as? Int ?? 0
+        selectedWorkspaceId = result["selectedWorkspaceId"] as? String ?? ""
         let rawRecords = result["records"] as? [[String: Any]] ?? []
         let desiredContainer = result["desired"] as? [String: Any] ?? [:]
         let rawDesired = desiredContainer["records"] as? [[String: Any]] ?? []
-        let desiredPairs: [(String, (Bool, String))] = rawDesired.compactMap { row -> (String, (Bool, String))? in
+        let desiredPairs: [(String, [String: Any])] = rawDesired.compactMap { row -> (String, [String: Any])? in
             guard let panelId = row["panelId"] as? String else { return nil }
-            return (
-                panelId,
-                (
-                    row["targetVisible"] as? Bool ?? false,
-                    row["targetResidency"] as? String ?? ""
-                )
-            )
+            return (panelId, row)
         }
         let desiredByPanel = Dictionary(uniqueKeysWithValues: desiredPairs)
 
@@ -290,16 +308,27 @@ private struct BrowserLifecycleSnapshot {
                   let workspaceId = row["workspaceId"] as? String else {
                 return nil
             }
-            let desired = desiredByPanel[panelId] ?? (false, "")
+            let desired = desiredByPanel[panelId] ?? [:]
             return BrowserLifecycleRecord(
                 panelId: panelId,
                 workspaceId: workspaceId,
+                state: row["state"] as? String ?? "",
+                residency: row["residency"] as? String ?? "",
                 selectedWorkspace: row["selectedWorkspace"] as? Bool ?? false,
                 activeWindowMembership: row["activeWindowMembership"] as? Bool ?? false,
-                desiredVisible: desired.0,
-                targetResidency: desired.1
+                desiredVisible: desired["targetVisible"] as? Bool ?? false,
+                desiredActive: desired["targetActive"] as? Bool ?? false,
+                targetResidency: desired["targetResidency"] as? String ?? "",
+                targetWindowNumber: desired["targetWindowNumber"] as? Int ?? 0
             )
         }
+    }
+}
+
+extension BrowserLifecycleSnapshot {
+    var debugSummary: String {
+        let sample = records.prefix(3).map(\.debugSummary).joined(separator: " | ")
+        return "activeWindowNumber=\(activeWindowNumber) selectedWorkspaceId=\(selectedWorkspaceId) records=\(records.count) sample=[\(sample)]"
     }
 }
 
