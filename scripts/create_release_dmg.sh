@@ -10,7 +10,7 @@ APP_PATH="$1"
 DMG_OUTPUT="$2"
 SIGNING_IDENTITY="${3:-}"
 MODERN_CREATE_DMG_VERSION="${CMUX_CREATE_DMG_MODERN_VERSION:-8.0.0}"
-REQUIRE_MODERN="${CMUX_CREATE_DMG_REQUIRE_MODERN:-0}"
+REQUIRE_STYLED="${CMUX_CREATE_DMG_REQUIRE_STYLED:-0}"
 
 if [ ! -d "$APP_PATH" ]; then
   echo "App not found: $APP_PATH" >&2
@@ -52,8 +52,37 @@ detect_create_dmg_mode() {
   fi
 }
 
+find_brew_legacy_create_dmg() {
+  local brew_prefix candidate
+
+  if ! command -v brew >/dev/null 2>&1; then
+    return 1
+  fi
+
+  brew_prefix="$(brew --prefix create-dmg 2>/dev/null || true)"
+  if [ -z "$brew_prefix" ]; then
+    return 1
+  fi
+
+  candidate="$brew_prefix/bin/create-dmg"
+  if [ ! -x "$candidate" ]; then
+    return 1
+  fi
+
+  if [ "$(detect_create_dmg_mode "$candidate")" != "legacy" ]; then
+    return 1
+  fi
+
+  printf '%s\n' "$candidate"
+}
+
+find_path_create_dmg() {
+  command -v create-dmg 2>/dev/null || true
+}
+
 create_dmg_legacy() {
-  local staging_dir app_name volume_name cmd
+  local legacy_bin staging_dir app_name volume_name cmd
+  legacy_bin="$1"
   staging_dir="$(mktemp -d)"
   cleanup_paths+=("$staging_dir")
 
@@ -62,7 +91,7 @@ create_dmg_legacy() {
   volume_name="$(basename "$DMG_OUTPUT" .dmg)"
 
   cmd=(
-    create-dmg
+    "$legacy_bin"
     --volname "$volume_name"
     --window-size 660 400
     --icon-size 128
@@ -106,11 +135,29 @@ create_dmg_modern() {
   mv "$generated_dmg" "$DMG_OUTPUT"
 }
 
-if command -v create-dmg >/dev/null 2>&1; then
-  if [ "$(detect_create_dmg_mode create-dmg)" = "modern" ]; then
-    create_dmg_modern create-dmg
-    exit 0
+legacy_bin="$(find_brew_legacy_create_dmg || true)"
+if [ -z "$legacy_bin" ]; then
+  path_bin="$(find_path_create_dmg)"
+  if [ -n "$path_bin" ] && [ "$(detect_create_dmg_mode "$path_bin")" = "legacy" ]; then
+    legacy_bin="$path_bin"
   fi
+fi
+
+if [ -n "$legacy_bin" ]; then
+  create_dmg_legacy "$legacy_bin"
+  exit 0
+fi
+
+if [ "$REQUIRE_STYLED" = "1" ]; then
+  echo "Styled DMG creation requires the legacy create-dmg CLI with layout flags." >&2
+  echo "Install the Homebrew create-dmg formula or provide a legacy create-dmg on PATH." >&2
+  exit 1
+fi
+
+path_bin="$(find_path_create_dmg)"
+if [ -n "$path_bin" ] && [ "$(detect_create_dmg_mode "$path_bin")" = "modern" ]; then
+  create_dmg_modern "$path_bin"
+  exit 0
 fi
 
 if command -v npx >/dev/null 2>&1; then
@@ -118,18 +165,9 @@ if command -v npx >/dev/null 2>&1; then
   exit 0
 fi
 
-if [ "$REQUIRE_MODERN" = "1" ]; then
-  echo "Modern create-dmg is required but unavailable (need create-dmg>=2 or npx)." >&2
-  exit 1
-fi
-
-if ! command -v create-dmg >/dev/null 2>&1; then
+if [ -z "$path_bin" ]; then
   echo "create-dmg is required but not found in PATH" >&2
   exit 1
 fi
 
-if [ "$(detect_create_dmg_mode create-dmg)" = "legacy" ]; then
-  create_dmg_legacy
-else
-  create_dmg_modern create-dmg
-fi
+create_dmg_modern "$path_bin"

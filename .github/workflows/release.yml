@@ -9,9 +9,6 @@ on:
 permissions:
   contents: write
 
-env:
-  CREATE_DMG_VERSION: 8.0.0
-
 jobs:
   build-sign-notarize:
     runs-on: depot-macos-latest
@@ -116,7 +113,7 @@ jobs:
       - name: Install build deps
         if: steps.guard_release_assets.outputs.skip_all != 'true'
         run: |
-          npm install --global "create-dmg@${CREATE_DMG_VERSION}"
+          brew list create-dmg >/dev/null 2>&1 || brew install create-dmg
 
       - name: Download pre-built GhosttyKit.xcframework
         if: steps.guard_release_assets.outputs.skip_all != 'true'
@@ -273,7 +270,7 @@ jobs:
           xcrun stapler validate "$APP_PATH"
           spctl -a -vv --type execute "$APP_PATH"
           rm -f "$ZIP_SUBMIT"
-          CMUX_CREATE_DMG_REQUIRE_MODERN=1 ./scripts/create_release_dmg.sh "$APP_PATH" "$DMG_RELEASE" "$APPLE_SIGNING_IDENTITY"
+          CMUX_CREATE_DMG_REQUIRE_STYLED=1 ./scripts/create_release_dmg.sh "$APP_PATH" "$DMG_RELEASE" "$APPLE_SIGNING_IDENTITY"
           DMG_SUBMIT_JSON="$(xcrun notarytool submit "$DMG_RELEASE" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait --output-format json)"
           DMG_SUBMIT_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"$DMG_SUBMIT_JSON")"
           DMG_STATUS="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' <<<"$DMG_SUBMIT_JSON")"

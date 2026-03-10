@@ -18,9 +18,6 @@ concurrency:
 permissions:
   contents: write
 
-env:
-  CREATE_DMG_VERSION: 8.0.0
-
 jobs:
   decide:
     runs-on: ubuntu-latest
@@ -126,7 +123,7 @@ jobs:
 
       - name: Install build deps
         run: |
-          npm install --global "create-dmg@${CREATE_DMG_VERSION}"
+          brew list create-dmg >/dev/null 2>&1 || brew install create-dmg
 
       - name: Download pre-built GhosttyKit.xcframework
         run: |
@@ -326,7 +323,7 @@ jobs:
             xcrun stapler validate "$app_path"
             spctl -a -vv --type execute "$app_path"
             rm -f "$zip_submit"
-            CMUX_CREATE_DMG_REQUIRE_MODERN=1 ./scripts/create_release_dmg.sh "$app_path" "$dmg_release" "$APPLE_SIGNING_IDENTITY"
+            CMUX_CREATE_DMG_REQUIRE_STYLED=1 ./scripts/create_release_dmg.sh "$app_path" "$dmg_release" "$APPLE_SIGNING_IDENTITY"
 
             DMG_SUBMIT_JSON="$(xcrun notarytool submit "$dmg_release" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait --output-format json)"
             DMG_SUBMIT_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"$DMG_SUBMIT_JSON")"

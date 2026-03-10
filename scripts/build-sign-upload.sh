@@ -56,10 +56,6 @@ export SPARKLE_PRIVATE_KEY
 for tool in zig xcodebuild xcrun codesign ditto gh; do
   command -v "$tool" >/dev/null || { echo "MISSING: $tool" >&2; exit 1; }
 done
-if ! command -v create-dmg >/dev/null 2>&1 && ! command -v npx >/dev/null 2>&1; then
-  echo "MISSING: create-dmg or npx" >&2
-  exit 1
-fi
 echo "Pre-flight checks passed"
 
 # --- Build GhosttyKit (if needed) ---
@@ -130,7 +126,7 @@ echo "App notarized"
 # --- Create and notarize DMG ---
 echo "Creating DMG..."
 rm -f cmux-macos.dmg
-CMUX_CREATE_DMG_REQUIRE_MODERN=1 ./scripts/create_release_dmg.sh "$APP_PATH" "cmux-macos.dmg" "$SIGN_HASH"
+CMUX_CREATE_DMG_REQUIRE_STYLED=1 ./scripts/create_release_dmg.sh "$APP_PATH" "cmux-macos.dmg" "$SIGN_HASH"
 echo "Notarizing DMG..."
 xcrun notarytool submit cmux-macos.dmg \
   --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait
