@@ -4854,14 +4854,7 @@ final class WorkspaceTerminalFocusRecoveryTests: XCTestCase {
         )
     }
 
-    func testProgrammaticSplitKeepsSourceFirstResponderUntilNewTerminalCanTakeFocus() {
-        let workspace = Workspace()
-        guard let sourcePanelId = workspace.focusedPanelId,
-              let sourcePanel = workspace.terminalPanel(for: sourcePanelId) else {
-            XCTFail("Expected initial focused terminal panel")
-            return
-        }
-
+    func testProgrammaticSplitSuppressionKeepsSourceFirstResponderUntilReplacementIsReady() {
         let window = makeWindow()
         defer { window.orderOut(nil) }
         guard let contentView = window.contentView else {
@@ -4869,55 +4862,68 @@ final class WorkspaceTerminalFocusRecoveryTests: XCTestCase {
             return
         }
 
-        sourcePanel.hostedView.frame = contentView.bounds
-        sourcePanel.hostedView.autoresizingMask = [.width, .height]
-        contentView.addSubview(sourcePanel.hostedView)
-        sourcePanel.hostedView.setVisibleInUI(true)
-        sourcePanel.hostedView.setFocusHandler {
-            workspace.focusPanel(sourcePanel.id, trigger: .terminalFirstResponder)
-        }
+        let sourceSurfaceView = GhosttyNSView(frame: NSRect(x: 0, y: 0, width: 180, height: 220))
+        let sourceHostedView = GhosttySurfaceScrollView(surfaceView: sourceSurfaceView)
+        sourceHostedView.frame = contentView.bounds
+        sourceHostedView.autoresizingMask = [.width, .height]
+        sourceHostedView.setVisibleInUI(true)
+        contentView.addSubview(sourceHostedView)
 
         window.makeKeyAndOrderFront(nil)
         window.displayIfNeeded()
         contentView.layoutSubtreeIfNeeded()
+        sourceHostedView.layoutSubtreeIfNeeded()
         RunLoop.current.run(until: Date().addingTimeInterval(0.05))
 
-        guard let sourceSurfaceView = surfaceView(in: sourcePanel.hostedView) else {
-            XCTFail("Expected source terminal surface view")
-            return
-        }
-
-        sourcePanel.hostedView.setActive(true)
+        sourceHostedView.setActive(true)
         XCTAssertTrue(
             window.makeFirstResponder(sourceSurfaceView),
-            "Expected source terminal surface view to accept first responder before the split"
+            "Expected the source terminal surface view to accept first responder before the split handoff"
         )
-        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertTrue(
+            sourceHostedView.isSurfaceViewFirstResponder(),
+            "Expected the source terminal to start as first responder"
+        )
+
+        sourceHostedView.suppressReparentFocus()
+        sourceHostedView.setActive(false)
 
         XCTAssertTrue(
-            sourcePanel.hostedView.isSurfaceViewFirstResponder(),
-            "Expected source terminal to start as first responder"
+            sourceHostedView.isSurfaceViewFirstResponder(),
+            "Expected split reparent suppression to keep the source terminal as first responder until the replacement terminal can take focus"
         )
+    }
 
-        guard let splitPanel = workspace.newTerminalSplit(
-            from: sourcePanelId,
-            orientation: .vertical
-        ) else {
-            XCTFail("Expected terminal split panel")
+    func testInactiveTerminalStillResignsFirstResponderOutsideProgrammaticSplitHandoff() {
+        let window = makeWindow()
+        defer { window.orderOut(nil) }
+        guard let contentView = window.contentView else {
+            XCTFail("Expected content view")
             return
         }
 
-        XCTAssertEqual(
-            workspace.focusedPanelId,
-            splitPanel.id,
-            "Expected the new split panel to become the selected model focus target"
-        )
+        let sourceSurfaceView = GhosttyNSView(frame: NSRect(x: 0, y: 0, width: 180, height: 220))
+        let sourceHostedView = GhosttySurfaceScrollView(surfaceView: sourceSurfaceView)
+        sourceHostedView.frame = contentView.bounds
+        sourceHostedView.autoresizingMask = [.width, .height]
+        sourceHostedView.setVisibleInUI(true)
+        contentView.addSubview(sourceHostedView)
 
-        RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        window.makeKeyAndOrderFront(nil)
+        window.displayIfNeeded()
+        contentView.layoutSubtreeIfNeeded()
+        sourceHostedView.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
 
-        XCTAssertTrue(
-            sourcePanel.hostedView.isSurfaceViewFirstResponder(),
-            "Expected the source terminal to keep first responder until the new split terminal is attached"
+        sourceHostedView.setActive(true)
+        XCTAssertTrue(window.makeFirstResponder(sourceSurfaceView))
+        XCTAssertTrue(sourceHostedView.isSurfaceViewFirstResponder())
+
+        sourceHostedView.setActive(false)
+
+        XCTAssertFalse(
+            sourceHostedView.isSurfaceViewFirstResponder(),
+            "Expected non-split inactive terminals to resign first responder normally"
         )
     }
 }
