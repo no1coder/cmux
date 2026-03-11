@@ -4,6 +4,7 @@ import CoreGraphics
 
 final class MultiWindowNotificationsUITests: XCTestCase {
     private var dataPath = ""
+    private var keyequivPath = ""
     private var socketPath = ""
     private var launchTag = ""
 
@@ -11,14 +12,17 @@ final class MultiWindowNotificationsUITests: XCTestCase {
         super.setUp()
         continueAfterFailure = false
         dataPath = "/tmp/cmux-ui-test-multi-window-notifs-\(UUID().uuidString).json"
+        keyequivPath = "/tmp/cmux-ui-test-keyequiv-\(UUID().uuidString).json"
         socketPath = "/tmp/cmux-ui-test-socket-\(UUID().uuidString).sock"
         launchTag = "ui-tests-multi-window-notifs-\(UUID().uuidString.prefix(8))"
         try? FileManager.default.removeItem(atPath: dataPath)
+        try? FileManager.default.removeItem(atPath: keyequivPath)
         try? FileManager.default.removeItem(atPath: socketPath)
     }
 
     override func tearDown() {
         try? FileManager.default.removeItem(atPath: dataPath)
+        try? FileManager.default.removeItem(atPath: keyequivPath)
         try? FileManager.default.removeItem(atPath: socketPath)
         super.tearDown()
     }
@@ -467,6 +471,133 @@ final class MultiWindowNotificationsUITests: XCTestCase {
         }
     }
 
+    func testGraphV1CmdNWorksWhenWebViewFocusedAfterMovingWorkspaceToNewWindow() throws {
+        let app = launchGraphV1BrowserWorkspaceMoveScenario()
+        guard let sourceWindowId = socketCommand("current_window"),
+              UUID(uuidString: sourceWindowId) != nil else {
+            XCTFail("Expected current_window to return a source window id")
+            return
+        }
+
+        guard let movedWorkspaceId = createdId(from: socketCommand("new_workspace")) else {
+            XCTFail("Expected new_workspace to return a workspace id")
+            return
+        }
+        guard let browserPanelId = createdId(from: socketCommand("open_browser about:blank")) else {
+            XCTFail("Expected open_browser to return a browser panel id")
+            return
+        }
+
+        XCTAssertTrue(
+            waitForSurfaceCount(2, timeout: 5.0),
+            "Expected moved workspace to contain terminal and browser surfaces before handoff"
+        )
+        XCTAssertTrue(
+            waitForBrowserWebViewFocus(panelId: browserPanelId, timeout: 8.0),
+            "Expected WKWebView to be first responder before moving the workspace"
+        )
+
+        guard let destinationWindowId = createdId(
+            from: socketCommand("move_workspace_to_new_window \(movedWorkspaceId)")
+        ) else {
+            XCTFail("Expected move_workspace_to_new_window to return a destination window id")
+            return
+        }
+
+        XCTAssertTrue(waitForWindowCount(atLeast: 2, app: app, timeout: 8.0))
+        XCTAssertTrue(
+            waitForWindowListSummary(windowId: destinationWindowId, timeout: 8.0) { summary in
+                summary.isKeyWindow && summary.selectedWorkspaceId == movedWorkspaceId && summary.workspaceCount == 1
+            },
+            "Expected moved browser workspace to be focused in the destination window after handoff"
+        )
+        XCTAssertTrue(
+            waitForBrowserWebViewFocus(panelId: browserPanelId, timeout: 8.0),
+            "Expected WKWebView to stay focusable after moving its workspace"
+        )
+
+        let baseline = loadKeyequiv()["addTabInvocations"].flatMap(Int.init) ?? 0
+        app.typeKey("n", modifierFlags: [.command])
+
+        XCTAssertTrue(
+            waitForKeyequivInt(key: "addTabInvocations", toBeAtLeast: baseline + 1, timeout: 5.0),
+            "Expected Cmd+N to be routed through the moved browser window"
+        )
+        XCTAssertTrue(
+            waitForWindowListSummary(windowId: destinationWindowId, timeout: 5.0) { summary in
+                summary.isKeyWindow && summary.workspaceCount == 2
+            },
+            "Expected Cmd+N to add a workspace in the moved destination window. list=\(socketCommand("list_windows") ?? "<nil>")"
+        )
+        XCTAssertTrue(
+            waitForWindowListSummary(windowId: sourceWindowId, timeout: 5.0) { summary in
+                summary.workspaceCount == 1
+            },
+            "Expected Cmd+N not to mutate the source window after moving the browser workspace. list=\(socketCommand("list_windows") ?? "<nil>")"
+        )
+    }
+
+    func testGraphV1CmdWWorksWhenWebViewFocusedAfterMovingWorkspaceToNewWindow() throws {
+        let app = launchGraphV1BrowserWorkspaceMoveScenario()
+        guard let movedWorkspaceId = createdId(from: socketCommand("new_workspace")) else {
+            XCTFail("Expected new_workspace to return a workspace id")
+            return
+        }
+        guard let browserPanelId = createdId(from: socketCommand("open_browser about:blank")) else {
+            XCTFail("Expected open_browser to return a browser panel id")
+            return
+        }
+
+        XCTAssertTrue(
+            waitForSurfaceCount(2, timeout: 5.0),
+            "Expected moved workspace to contain terminal and browser surfaces before handoff"
+        )
+        XCTAssertTrue(
+            waitForBrowserWebViewFocus(panelId: browserPanelId, timeout: 8.0),
+            "Expected WKWebView to be first responder before moving the workspace"
+        )
+
+        guard let destinationWindowId = createdId(
+            from: socketCommand("move_workspace_to_new_window \(movedWorkspaceId)")
+        ) else {
+            XCTFail("Expected move_workspace_to_new_window to return a destination window id")
+            return
+        }
+
+        XCTAssertTrue(waitForWindowCount(atLeast: 2, app: app, timeout: 8.0))
+        XCTAssertTrue(
+            waitForWindowListSummary(windowId: destinationWindowId, timeout: 8.0) { summary in
+                summary.isKeyWindow && summary.selectedWorkspaceId == movedWorkspaceId && summary.workspaceCount == 1
+            },
+            "Expected moved browser workspace to be focused in the destination window after handoff"
+        )
+        XCTAssertTrue(
+            waitForBrowserWebViewFocus(panelId: browserPanelId, timeout: 8.0),
+            "Expected WKWebView to stay focusable after moving its workspace"
+        )
+
+        let baseline = loadKeyequiv()["closePanelInvocations"].flatMap(Int.init) ?? 0
+        app.typeKey("w", modifierFlags: [.command])
+
+        XCTAssertTrue(
+            waitForKeyequivInt(key: "closePanelInvocations", toBeAtLeast: baseline + 1, timeout: 5.0),
+            "Expected Cmd+W to be routed through the moved browser window"
+        )
+        XCTAssertEqual(
+            socketCommand("focus_window \(destinationWindowId)"),
+            "OK",
+            "Expected to refocus the moved destination window before inspecting remaining surfaces"
+        )
+        XCTAssertTrue(
+            waitForSurfaceCount(1, timeout: 5.0),
+            "Expected Cmd+W to close the focused browser panel in the moved destination workspace. surfaces=\(socketCommand("list_surfaces") ?? "<nil>")"
+        )
+        XCTAssertFalse(
+            socketCommand("list_surfaces")?.contains(browserPanelId) == true,
+            "Expected the moved browser panel to be closed after Cmd+W"
+        )
+    }
+
     private func clickNotificationPopoverRowAndWaitForFocusChange(
         button: XCUIElement,
         app: XCUIApplication,
@@ -509,6 +640,35 @@ final class MultiWindowNotificationsUITests: XCTestCase {
             return app.wait(for: .runningForeground, timeout: 6.0)
         }
         return false
+    }
+
+    private func launchGraphV1BrowserWorkspaceMoveScenario() -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments += ["-socketControlMode", "allowAll"]
+        app.launchEnvironment["CMUX_WORKSPACE_ENGINE"] = "graph-v1"
+        app.launchEnvironment["CMUX_SOCKET_PATH"] = socketPath
+        app.launchEnvironment["CMUX_SOCKET_MODE"] = "allowAll"
+        app.launchEnvironment["CMUX_SOCKET_ENABLE"] = "1"
+        app.launchEnvironment["CMUX_UI_TEST_SOCKET_SANITY"] = "1"
+        app.launchEnvironment["CMUX_UI_TEST_KEYEQUIV_PATH"] = keyequivPath
+        app.launchEnvironment["CMUX_TAG"] = launchTag
+        app.launch()
+
+        XCTAssertTrue(
+            ensureForegroundAfterLaunch(app, timeout: 12.0),
+            "Expected app to launch for moved browser workspace test. state=\(app.state.rawValue)"
+        )
+        XCTAssertTrue(waitForWindowCount(atLeast: 1, app: app, timeout: 8.0))
+
+        guard let resolvedPath = resolveSocketPath(timeout: 8.0) else {
+            XCTFail("Control socket unavailable in this test environment. requested=\(socketPath)")
+            return app
+        }
+        socketPath = resolvedPath
+
+        let pingResponse = waitForSocketPong(timeout: 8.0)
+        XCTAssertEqual(pingResponse, "PONG", "Expected control socket ping sanity check")
+        return app
     }
 
     private func waitForElementToDisappear(_ element: XCUIElement, timeout: TimeInterval) -> Bool {
@@ -587,6 +747,19 @@ final class MultiWindowNotificationsUITests: XCTestCase {
             RunLoop.current.run(until: Date().addingTimeInterval(0.05))
         }
         return socketCommand("is_terminal_focused \(surfaceId)") == "true"
+    }
+
+    private func waitForBrowserWebViewFocus(panelId: String, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            _ = socketCommand("focus_webview \(panelId)")
+            if socketCommand("is_webview_focused \(panelId)") == "true" {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        _ = socketCommand("focus_webview \(panelId)")
+        return socketCommand("is_webview_focused \(panelId)") == "true"
     }
 
     private func waitForCmuxPing(timeout: TimeInterval) -> (stdout: String?, stderr: String?) {
@@ -893,6 +1066,50 @@ final class MultiWindowNotificationsUITests: XCTestCase {
             RunLoop.current.run(until: Date().addingTimeInterval(0.05))
         }
         return paneCount(from: socketCommand("list_panes")) == expectedCount
+    }
+
+    private func surfaceCount(from response: String?) -> Int? {
+        guard let response,
+              !response.isEmpty,
+              !response.hasPrefix("ERROR"),
+              response != "No surfaces" else {
+            return nil
+        }
+
+        return response
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .count
+    }
+
+    private func waitForSurfaceCount(_ expectedCount: Int, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if surfaceCount(from: socketCommand("list_surfaces")) == expectedCount {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        return surfaceCount(from: socketCommand("list_surfaces")) == expectedCount
+    }
+
+    private func loadKeyequiv() -> [String: String] {
+        guard let raw = try? Data(contentsOf: URL(fileURLWithPath: keyequivPath)) else {
+            return [:]
+        }
+        return (try? JSONSerialization.jsonObject(with: raw)) as? [String: String] ?? [:]
+    }
+
+    private func waitForKeyequivInt(key: String, toBeAtLeast expected: Int, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let value = loadKeyequiv()[key].flatMap(Int.init) ?? 0
+            if value >= expected {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        let value = loadKeyequiv()[key].flatMap(Int.init) ?? 0
+        return value >= expected
     }
 
     private func runCmuxNotify(
