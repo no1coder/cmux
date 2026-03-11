@@ -532,6 +532,74 @@ final class MultiWindowNotificationsUITests: XCTestCase {
         XCTAssertEqual(loadData()?["browserPanelId"], browserPanelId, "Expected test snapshot to keep the original moved browser panel id")
     }
 
+    func testGraphV1CmdNWorksWhenWebViewFocusedAfterMovingWorkspaceToExistingWindow() throws {
+        let app = launchGraphV1BrowserWorkspaceMoveScenario(
+            destinationMode: "existing_window",
+            expectedDestinationWorkspaceCount: "2"
+        )
+        guard let setup = loadData() else {
+            XCTFail("Expected moved browser setup data")
+            return
+        }
+        let sourceWindowId = setup["sourceWindowId"] ?? ""
+        let destinationWindowId = setup["destinationWindowId"] ?? ""
+        XCTAssertFalse(sourceWindowId.isEmpty, "Expected source window id in moved browser setup. data=\(setup)")
+        XCTAssertFalse(destinationWindowId.isEmpty, "Expected destination window id in moved browser setup. data=\(setup)")
+
+        let baseline = loadKeyequiv()["addTabInvocations"].flatMap(Int.init) ?? 0
+        app.typeKey("n", modifierFlags: [.command])
+
+        XCTAssertTrue(
+            waitForKeyequivInt(key: "addTabInvocations", toBeAtLeast: baseline + 1, timeout: 5.0),
+            "Expected Cmd+N to be routed through the moved browser window"
+        )
+        XCTAssertTrue(
+            waitForDataMatch(timeout: 5.0) { data in
+                data["destinationWindowId"] == destinationWindowId
+                    && data["destinationIsKeyWindow"] == "1"
+                    && data["destinationWorkspaceCount"] == "3"
+            },
+            "Expected Cmd+N to add a workspace in the existing destination window. data=\(loadData() ?? [:])"
+        )
+        XCTAssertTrue(
+            waitForDataMatch(timeout: 5.0) { data in
+                data["sourceWindowId"] == sourceWindowId
+                    && data["sourceWorkspaceCount"] == "1"
+            },
+            "Expected Cmd+N not to mutate the source window after moving the browser workspace. data=\(loadData() ?? [:])"
+        )
+    }
+
+    func testGraphV1CmdWWorksWhenWebViewFocusedAfterMovingWorkspaceToExistingWindow() throws {
+        let app = launchGraphV1BrowserWorkspaceMoveScenario(
+            destinationMode: "existing_window",
+            expectedDestinationWorkspaceCount: "2"
+        )
+        guard let setup = loadData() else {
+            XCTFail("Expected moved browser setup data")
+            return
+        }
+        let browserPanelId = setup["browserPanelId"] ?? ""
+        XCTAssertFalse(browserPanelId.isEmpty, "Expected browser panel id in moved browser setup. data=\(setup)")
+
+        let baseline = loadKeyequiv()["closePanelInvocations"].flatMap(Int.init) ?? 0
+        app.typeKey("w", modifierFlags: [.command])
+
+        XCTAssertTrue(
+            waitForKeyequivInt(key: "closePanelInvocations", toBeAtLeast: baseline + 1, timeout: 5.0),
+            "Expected Cmd+W to be routed through the moved browser window"
+        )
+        XCTAssertTrue(
+            waitForDataMatch(timeout: 5.0) { data in
+                data["destinationWorkspaceCount"] == "2"
+                    && data["destinationSurfaceCount"] == "1"
+                    && data["browserPanelPresent"] == "0"
+            },
+            "Expected Cmd+W to close the focused browser panel in the existing destination workspace. data=\(loadData() ?? [:])"
+        )
+        XCTAssertEqual(loadData()?["browserPanelId"], browserPanelId, "Expected test snapshot to keep the original moved browser panel id")
+    }
+
     private func clickNotificationPopoverRowAndWaitForFocusChange(
         button: XCUIElement,
         app: XCUIApplication,
@@ -576,11 +644,15 @@ final class MultiWindowNotificationsUITests: XCTestCase {
         return false
     }
 
-    private func launchGraphV1BrowserWorkspaceMoveScenario() -> XCUIApplication {
+    private func launchGraphV1BrowserWorkspaceMoveScenario(
+        destinationMode: String = "new_window",
+        expectedDestinationWorkspaceCount: String = "1"
+    ) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment["CMUX_WORKSPACE_ENGINE"] = "graph-v1"
         app.launchEnvironment["CMUX_UI_TEST_MOVED_BROWSER_WINDOW_SETUP"] = "1"
         app.launchEnvironment["CMUX_UI_TEST_MOVED_BROWSER_WINDOW_PATH"] = dataPath
+        app.launchEnvironment["CMUX_UI_TEST_MOVED_BROWSER_WINDOW_MODE"] = destinationMode
         app.launchEnvironment["CMUX_UI_TEST_KEYEQUIV_PATH"] = keyequivPath
         app.launchEnvironment["CMUX_TAG"] = launchTag
         app.launch()
@@ -598,7 +670,11 @@ final class MultiWindowNotificationsUITests: XCTestCase {
             "Expected moved browser setup data before asserting browser window routing"
         )
         XCTAssertEqual(loadData()?["setupReady"], "1", "Expected moved browser setup to succeed. data=\(loadData() ?? [:])")
-        XCTAssertEqual(loadData()?["destinationWorkspaceCount"], "1", "Expected moved destination window to start with one workspace. data=\(loadData() ?? [:])")
+        XCTAssertEqual(
+            loadData()?["destinationWorkspaceCount"],
+            expectedDestinationWorkspaceCount,
+            "Expected moved destination window to start with the expected workspace count. data=\(loadData() ?? [:])"
+        )
         XCTAssertEqual(loadData()?["sourceWorkspaceCount"], "1", "Expected source window to keep one workspace after move. data=\(loadData() ?? [:])")
         XCTAssertEqual(loadData()?["destinationSurfaceCount"], "2", "Expected moved destination workspace to start with terminal and browser surfaces. data=\(loadData() ?? [:])")
         XCTAssertEqual(loadData()?["browserPanelPresent"], "1", "Expected moved browser panel to be present at launch. data=\(loadData() ?? [:])")
