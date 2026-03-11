@@ -650,6 +650,7 @@ final class MultiWindowNotificationsUITests: XCTestCase {
         app.launchEnvironment["CMUX_SOCKET_MODE"] = "allowAll"
         app.launchEnvironment["CMUX_SOCKET_ENABLE"] = "1"
         app.launchEnvironment["CMUX_UI_TEST_SOCKET_SANITY"] = "1"
+        app.launchEnvironment["CMUX_UI_TEST_SOCKET_SANITY_PATH"] = dataPath
         app.launchEnvironment["CMUX_UI_TEST_KEYEQUIV_PATH"] = keyequivPath
         app.launchEnvironment["CMUX_TAG"] = launchTag
         app.launch()
@@ -659,9 +660,28 @@ final class MultiWindowNotificationsUITests: XCTestCase {
             "Expected app to launch for moved browser workspace test. state=\(app.state.rawValue)"
         )
         XCTAssertTrue(waitForWindowCount(atLeast: 1, app: app, timeout: 8.0))
+        XCTAssertTrue(
+            waitForDataMatch(timeout: 20.0) { data in
+                let socketReady = data["socketReady"] ?? ""
+                return socketReady == "1" || socketReady == "0"
+            },
+            "Expected socket sanity data before using the moved browser workspace control socket"
+        )
+        if let setup = loadData() {
+            if let expectedPath = setup["socketExpectedPath"], !expectedPath.isEmpty {
+                socketPath = expectedPath
+            }
+            XCTAssertEqual(
+                setup["socketReady"],
+                "1",
+                "Expected control socket to be healthy before moved browser workspace assertions. data=\(setup)"
+            )
+        }
 
         guard let resolvedPath = resolveSocketPath(timeout: 8.0) else {
-            XCTFail("Control socket unavailable in this test environment. requested=\(socketPath)")
+            XCTFail(
+                "Control socket unavailable in this test environment. requested=\(socketPath) data=\(loadData() ?? [:])"
+            )
             return app
         }
         socketPath = resolvedPath

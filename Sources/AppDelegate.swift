@@ -1954,6 +1954,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var didSetupJumpUnreadUITest = false
     private var jumpUnreadFocusExpectation: (tabId: UUID, surfaceId: UUID)?
     private var jumpUnreadFocusObserver: NSObjectProtocol?
+    private var didSetupSocketSanityUITest = false
     private var didSetupGotoSplitUITest = false
     private var gotoSplitUITestObservers: [NSObjectProtocol] = []
     private var didSetupMultiWindowNotificationsUITest = false
@@ -2328,6 +2329,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.setupJumpUnreadUITestIfNeeded()
+            self.setupSocketSanityUITestIfNeeded()
             self.setupGotoSplitUITestIfNeeded()
             self.setupMultiWindowNotificationsUITestIfNeeded()
         }
@@ -7099,6 +7101,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return object
     }
 
+    private func setupSocketSanityUITestIfNeeded() {
+        guard !didSetupSocketSanityUITest else { return }
+        didSetupSocketSanityUITest = true
+
+        let env = ProcessInfo.processInfo.environment
+        guard let path = env["CMUX_UI_TEST_SOCKET_SANITY_PATH"], !path.isEmpty else { return }
+
+        try? FileManager.default.removeItem(atPath: path)
+        publishSocketSanityState(at: path) { [weak self] updates, targetPath in
+            self?.writeSocketSanityTestData(updates, at: targetPath)
+        }
+    }
+
+    private func writeSocketSanityTestData(_ updates: [String: String], at path: String) {
+        var payload = loadSocketSanityTestData(at: path)
+        for (key, value) in updates {
+            payload[key] = value
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
+    }
+
+    private func loadSocketSanityTestData(at path: String) -> [String: String] {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: String] else {
+            return [:]
+        }
+        return object
+    }
+
     private func setupMultiWindowNotificationsUITestIfNeeded() {
         guard !didSetupMultiWindowNotificationsUITest else { return }
         didSetupMultiWindowNotificationsUITest = true
@@ -7298,8 +7330,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let env = ProcessInfo.processInfo.environment
         guard env["CMUX_UI_TEST_SOCKET_SANITY"] == "1" else { return }
 
+        publishSocketSanityState(at: path) { [weak self] updates, targetPath in
+            self?.writeMultiWindowNotificationTestData(updates, at: targetPath)
+        }
+    }
+
+    private func publishSocketSanityState(
+        at path: String,
+        write: @escaping ([String: String], String) -> Void
+    ) {
+        let env = ProcessInfo.processInfo.environment
         guard let config = socketListenerConfigurationIfEnabled() else {
-            writeMultiWindowNotificationTestData([
+            write([
                 "socketExpectedPath": env["CMUX_SOCKET_PATH"] ?? "",
                 "socketMode": "off",
                 "socketReady": "0",
@@ -7309,18 +7351,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 "socketPathMatches": "0",
                 "socketPathExists": "0",
                 "socketFailureSignals": "socket_disabled",
-            ], at: path)
+            ], path)
             return
         }
 
-        writeMultiWindowNotificationTestData([
+        write([
             "socketExpectedPath": config.path,
             "socketMode": config.mode.rawValue,
             "socketReady": "pending",
             "socketPingResponse": "",
-        ], at: path)
+        ], path)
 
-        restartSocketListenerIfEnabled(source: "uiTest.multiWindowNotifications.setup")
+        restartSocketListenerIfEnabled(source: "uiTest.socketSanity.setup")
 
         let deadline = Date().addingTimeInterval(20.0)
         func publish() {
@@ -7330,7 +7372,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             let socketMode = config.mode.rawValue
             let dataPath = path
 
-            DispatchQueue.global(qos: .utility).async { [weak self] in
+            DispatchQueue.global(qos: .utility).async {
                 let pingResponse = health.isHealthy
                     ? TerminalController.probeSocketCommand("ping", at: socketPath, timeout: 1.0)
                     : nil
@@ -7343,9 +7385,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     return signals.joined(separator: ",")
                 }()
 
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    self.writeMultiWindowNotificationTestData([
+                DispatchQueue.main.async {
+                    write([
                         "socketExpectedPath": socketPath,
                         "socketMode": socketMode,
                         "socketReady": isReady ? "1" : (isTimedOut ? "0" : "pending"),
@@ -7355,7 +7396,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                         "socketPathMatches": health.socketPathMatches ? "1" : "0",
                         "socketPathExists": health.socketPathExists ? "1" : "0",
                         "socketFailureSignals": failureSignals,
-                    ], at: dataPath)
+                    ], dataPath)
                     guard !isTimedOut, !isReady else { return }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                         publish()
