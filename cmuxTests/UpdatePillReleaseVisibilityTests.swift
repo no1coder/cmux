@@ -177,3 +177,29 @@ final class TitlebarControlsHoverPolicyTests: XCTestCase {
         XCTAssertFalse(titlebarControlsShouldTrackButtonHover(config: TitlebarControlsStyle.softButtons.config))
     }
 }
+
+final class NotificationPaneRingSettingsTests: XCTestCase {
+    func testDefaultsToEnabledWhenUnset() {
+        let suiteName = "NotificationPaneRingSettingsTests.Default.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Failed to create isolated UserDefaults suite")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertTrue(NotificationPaneRingSettings.isEnabled(defaults: defaults))
+    }
+
+    func testReadsPersistedDisabledValue() {
+        let suiteName = "NotificationPaneRingSettingsTests.Disabled.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Failed to create isolated UserDefaults suite")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        defaults.set(false, forKey: NotificationPaneRingSettings.enabledKey)
+
+        XCTAssertFalse(NotificationPaneRingSettings.isEnabled(defaults: defaults))
+    }
+}

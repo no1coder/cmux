@@ -44900,6 +44900,40 @@
         }
       }
     },
+    "settings.notifications.paneRing.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show a blue ring around panes with unread notifications."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未読の通知があるペインの周囲に青いリングを表示します。"
+          }
+        }
+      }
+    },
+    "settings.notifications.paneRing.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unread Pane Ring"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未読ペインリング"
+          }
+        }
+      }
+    },
     "settings.notifications.sound.title": {
       "extractionState": "manual",
       "localizations": {

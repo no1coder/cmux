@@ -527,6 +527,18 @@ enum NotificationBadgeSettings {
     }
 }
 
+enum NotificationPaneRingSettings {
+    static let enabledKey = "notificationPaneRingEnabled"
+    static let defaultEnabled = true
+
+    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        if defaults.object(forKey: enabledKey) == nil {
+            return defaultEnabled
+        }
+        return defaults.bool(forKey: enabledKey)
+    }
+}
+
 enum TaggedRunBadgeSettings {
     static let environmentKey = "CMUX_TAG"
     private static let maxTagLength = 10
