@@ -7145,6 +7145,18 @@ final class GhosttySurfaceScrollView: NSView {
         case .searchField:
             if let firstResponder = window.firstResponder,
                isSearchOverlayOrDescendant(firstResponder),
+               isCurrentSurfaceSearchResponder(firstResponder) {
+                surfaceView.terminalSurface?.setFocus(false)
+#if DEBUG
+                dlog(
+                    "find.restoreSearchFocus.skip surface=\(surfaceShort) target=searchField " +
+                    "reason=alreadyFocused firstResponder=\(String(describing: firstResponder))"
+                )
+#endif
+                return
+            }
+            if let firstResponder = window.firstResponder,
+               isSearchOverlayOrDescendant(firstResponder),
                !isCurrentSurfaceSearchResponder(firstResponder) {
                 surfaceView.terminalSurface?.setFocus(false)
 #if DEBUG
