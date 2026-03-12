@@ -4359,6 +4359,13 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         )
 #endif
 
+        // Keep the macOS Find shortcuts app-owned even when Ghostty also has
+        // matching surface bindings. If the menu path misses, fall back to the
+        // exact surface that currently owns first responder.
+        if handleTerminalFindShortcutEquivalent(event: event, ghosttyView: self) {
+            return true
+        }
+
         // Check if this event matches a Ghostty keybinding.
         let bindingFlags: ghostty_binding_flags_e? = {
             var keyEvent = ghosttyKeyEvent(for: event, surface: surface)
