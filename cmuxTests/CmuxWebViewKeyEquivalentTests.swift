@@ -8206,7 +8206,14 @@ final class NotificationDockBadgeTests: XCTestCase {
     private final class NotificationSettingsAlertSpy: NSAlert {
         private(set) var beginSheetModalCallCount = 0
         private(set) var runModalCallCount = 0
+        private(set) var addedButtonTitles: [String] = []
         var nextResponse: NSApplication.ModalResponse = .alertFirstButtonReturn
+
+        @discardableResult
+        override func addButton(withTitle title: String) -> NSButton {
+            addedButtonTitles.append(title)
+            return super.addButton(withTitle: title)
+        }
 
         override func beginSheetModal(
             for sheetWindow: NSWindow,
@@ -8224,6 +8231,7 @@ final class NotificationDockBadgeTests: XCTestCase {
 
     override func tearDown() {
         TerminalNotificationStore.shared.resetNotificationSettingsPromptHooksForTesting()
+        TerminalNotificationStore.shared.setNotificationSettingsPromptSuppressedForTesting(false)
         TerminalNotificationStore.shared.replaceNotificationsForTesting([])
         super.tearDown()
     }
@@ -8671,6 +8679,10 @@ final class NotificationDockBadgeTests: XCTestCase {
         XCTAssertEqual(alertSpy.beginSheetModalCallCount, 1)
         XCTAssertEqual(alertSpy.runModalCallCount, 0)
         XCTAssertEqual(
+            alertSpy.addedButtonTitles,
+            ["Open Settings", "Not Now", "Never Ask Again"]
+        )
+        XCTAssertEqual(
             openedURL?.absoluteString,
             "x-apple.systempreferences:com.apple.preference.notifications"
         )
@@ -8709,6 +8721,48 @@ final class NotificationDockBadgeTests: XCTestCase {
 
         XCTAssertEqual(alertSpy.beginSheetModalCallCount, 1)
         XCTAssertEqual(alertSpy.runModalCallCount, 0)
+    }
+
+    func testNotificationSettingsPromptNeverAskAgainSuppressesFuturePrompts() {
+        let store = TerminalNotificationStore.shared
+        let firstAlertSpy = NotificationSettingsAlertSpy()
+        firstAlertSpy.nextResponse = .alertThirdButtonReturn
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 320),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+
+        store.configureNotificationSettingsPromptHooksForTesting(
+            windowProvider: { window },
+            alertFactory: { firstAlertSpy },
+            scheduler: { _, block in block() },
+            urlOpener: { _ in XCTFail("Should not open settings for Never Ask Again response") }
+        )
+
+        store.promptToEnableNotificationsForTesting()
+        let firstDrain = expectation(description: "first main queue drain")
+        DispatchQueue.main.async { firstDrain.fulfill() }
+        wait(for: [firstDrain], timeout: 1.0)
+
+        XCTAssertEqual(firstAlertSpy.beginSheetModalCallCount, 1)
+        XCTAssertTrue(store.isNotificationSettingsPromptSuppressedForTesting())
+
+        let secondAlertSpy = NotificationSettingsAlertSpy()
+        store.configureNotificationSettingsPromptHooksForTesting(
+            windowProvider: { window },
+            alertFactory: { secondAlertSpy },
+            scheduler: { _, block in block() },
+            urlOpener: { _ in XCTFail("Prompt should stay suppressed") }
+        )
+
+        store.promptToEnableNotificationsForTesting()
+        let secondDrain = expectation(description: "second main queue drain")
+        DispatchQueue.main.async { secondDrain.fulfill() }
+        wait(for: [secondDrain], timeout: 1.0)
+
+        XCTAssertEqual(secondAlertSpy.beginSheetModalCallCount, 0)
     }
 
     func testNotificationIndexesTrackUnreadCountsByTabAndSurface() {
