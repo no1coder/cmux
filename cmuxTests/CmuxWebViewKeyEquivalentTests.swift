@@ -3763,6 +3763,28 @@ final class TerminalFindShortcutRoutingTests: XCTestCase {
 
         XCTAssertNotNil(panel.searchState, "Repeated menu terminal Find should keep the existing overlay visible")
     }
+
+    func testStartOrFocusTerminalSearchDoesNotRepostWhenSearchAlreadyExists() {
+        let surface = TerminalSurface(
+            tabId: UUID(),
+            context: GHOSTTY_SURFACE_CONTEXT_SPLIT,
+            configTemplate: nil,
+            workingDirectory: nil
+        )
+        surface.searchState = TerminalSurface.SearchState()
+
+        var focusNotificationCount = 0
+        XCTAssertTrue(
+            startOrFocusTerminalSearch(surface) { _ in
+                focusNotificationCount += 1
+            }
+        )
+        XCTAssertEqual(
+            focusNotificationCount,
+            0,
+            "Repeated terminal Find should keep the existing overlay without reposting focus"
+        )
+    }
 }
 
 final class CommandPaletteKeyboardNavigationTests: XCTestCase {
@@ -10891,6 +10913,18 @@ final class GhosttySurfaceOverlayTests: XCTestCase {
         return nil
     }
 
+    private func findButton(in view: NSView) -> NSButton? {
+        if let button = view as? NSButton {
+            return button
+        }
+        for subview in view.subviews {
+            if let button = findButton(in: subview) {
+                return button
+            }
+        }
+        return nil
+    }
+
     func testTrackpadScrollRoutesToTerminalSurfaceAndPreservesKeyboardFocusPath() {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 360, height: 240),
@@ -11188,6 +11222,72 @@ final class GhosttySurfaceOverlayTests: XCTestCase {
             searchFocusNotificationCount,
             0,
             "Already-focused terminal find field should not repost ghosttySearchFocus"
+        )
+    }
+
+    func testRestorePanelFocusIntentRepostsWhenFindOverlayButtonOwnsFocus() {
+        let surface = TerminalSurface(
+            tabId: UUID(),
+            context: GHOSTTY_SURFACE_CONTEXT_SPLIT,
+            configTemplate: nil,
+            workingDirectory: nil
+        )
+        let hostedView = surface.hostedView
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 240),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+
+        guard let contentView = window.contentView else {
+            XCTFail("Expected content view")
+            return
+        }
+        hostedView.frame = contentView.bounds
+        hostedView.autoresizingMask = [.width, .height]
+        contentView.addSubview(hostedView)
+
+        window.makeKeyAndOrderFront(nil)
+        window.displayIfNeeded()
+        contentView.layoutSubtreeIfNeeded()
+        hostedView.setVisibleInUI(true)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+
+        let searchState = TerminalSurface.SearchState(needle: "focus")
+        surface.searchState = searchState
+        hostedView.setSearchOverlay(searchState: searchState)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+
+        guard let button = findButton(in: hostedView) else {
+            XCTFail("Expected mounted find overlay button")
+            return
+        }
+        XCTAssertTrue(window.makeFirstResponder(button), "Expected find overlay button to become first responder")
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+
+        var searchFocusNotificationCount = 0
+        let observer = NotificationCenter.default.addObserver(
+            forName: .ghosttySearchFocus,
+            object: surface,
+            queue: .main
+        ) { _ in
+            searchFocusNotificationCount += 1
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        XCTAssertTrue(
+            hostedView.restorePanelFocusIntent(.findField),
+            "Expected find-field focus intent to restore while search is active"
+        )
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+
+        XCTAssertEqual(
+            searchFocusNotificationCount,
+            1,
+            "Find overlay buttons should restore focus back to the editable field"
         )
     }
 

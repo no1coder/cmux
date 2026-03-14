@@ -7151,8 +7151,7 @@ final class GhosttySurfaceScrollView: NSView {
         switch searchFocusTarget {
         case .searchField:
             if let firstResponder = window.firstResponder,
-               isSearchOverlayOrDescendant(firstResponder),
-               isCurrentSurfaceSearchResponder(firstResponder) {
+               isCurrentSurfaceSearchFieldResponder(firstResponder) {
                 surfaceView.terminalSurface?.setFocus(false)
 #if DEBUG
                 dlog(
@@ -7363,6 +7362,17 @@ final class GhosttySurfaceScrollView: NSView {
 
         guard let view = resolvedResponder as? NSView else { return false }
         return view.isDescendant(of: self)
+    }
+
+    private func isCurrentSurfaceSearchFieldResponder(_ responder: NSResponder) -> Bool {
+        if let editor = responder as? NSTextView,
+           editor.isFieldEditor,
+           let editedView = editor.delegate as? NSTextField {
+            return editedView.isDescendant(of: self) && isSearchOverlayOrDescendant(editedView)
+        }
+
+        guard let textField = responder as? NSTextField else { return false }
+        return textField.isDescendant(of: self) && isSearchOverlayOrDescendant(textField)
     }
 
 #if DEBUG

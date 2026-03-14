@@ -1690,7 +1690,6 @@ func startOrFocusTerminalSearch(
     }
 ) -> Bool {
     if terminalSurface.searchState != nil {
-        searchFocusNotifier(terminalSurface)
         return true
     }
 
