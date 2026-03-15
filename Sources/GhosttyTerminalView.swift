@@ -5935,7 +5935,7 @@ final class GhosttySurfaceScrollView: NSView {
     private var windowObservers: [NSObjectProtocol] = []
     private var isLiveScrolling = false
     private var lastSentRow: Int?
-    private var explicitViewportChangeDeadline: CFTimeInterval = 0
+    private var pendingExplicitViewportChange = false
     private var pendingAnchorCorrectionRow: Int?
     private var isActive = true
     private var lastFocusRefreshAt: CFTimeInterval = 0
@@ -8202,13 +8202,9 @@ final class GhosttySurfaceScrollView: NSView {
         }
     }
 
-    fileprivate func markExplicitViewportChange(window: CFTimeInterval = 0.35) {
-        explicitViewportChangeDeadline = max(explicitViewportChangeDeadline, CACurrentMediaTime() + window)
+    fileprivate func markExplicitViewportChange(window _: CFTimeInterval = 0.35) {
+        pendingExplicitViewportChange = true
         pendingAnchorCorrectionRow = nil
-    }
-
-    private func isExplicitViewportChangeActive() -> Bool {
-        isLiveScrolling || CACurrentMediaTime() <= explicitViewportChangeDeadline
     }
 
     private func makeViewportSyncPlan(isExplicitViewportChange: Bool) -> GhosttyScrollViewportSyncPlan? {
@@ -8244,10 +8240,14 @@ final class GhosttySurfaceScrollView: NSView {
         guard let scrollbar = notification.userInfo?[GhosttyNotificationKey.scrollbar] as? GhosttyScrollbar else {
             return
         }
+        let explicitViewportChange = ghosttyConsumeExplicitViewportChange(
+            pendingExplicitViewportChange: pendingExplicitViewportChange
+        )
+        pendingExplicitViewportChange = explicitViewportChange.remainingPendingExplicitViewportChange
         let syncPlan = ghosttyScrollViewportSyncPlan(
             scrollbar: scrollbar,
             storedTopVisibleRow: surfaceView.terminalSurface?.storedScrollViewportAnchorTopVisibleRow(),
-            isExplicitViewportChange: isExplicitViewportChangeActive()
+            isExplicitViewportChange: isLiveScrolling || explicitViewportChange.isExplicitViewportChange
         )
         if pendingAnchorCorrectionRow == scrollbar.offsetRows {
             pendingAnchorCorrectionRow = nil

@@ -39,6 +39,11 @@ struct GhosttyScrollCorrectionDispatchState: Equatable {
     let pendingAnchorCorrectionRow: Int?
 }
 
+struct GhosttyExplicitViewportChangeConsumption: Equatable {
+    let isExplicitViewportChange: Bool
+    let remainingPendingExplicitViewportChange: Bool
+}
+
 func ghosttyScrollViewportSyncPlan(
     scrollbar: GhosttyScrollbar,
     storedTopVisibleRow: Int?,
@@ -86,6 +91,15 @@ func ghosttyShouldBeginExplicitViewportChange(
     case let .bindingAction(action, source):
         return ghosttyShouldMarkExplicitViewportChange(action: action, source: source)
     }
+}
+
+func ghosttyConsumeExplicitViewportChange(
+    pendingExplicitViewportChange: Bool
+) -> GhosttyExplicitViewportChangeConsumption {
+    GhosttyExplicitViewportChangeConsumption(
+        isExplicitViewportChange: pendingExplicitViewportChange,
+        remainingPendingExplicitViewportChange: false
+    )
 }
 
 func ghosttyScrollCorrectionDispatchState(
