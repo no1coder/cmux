@@ -45,4 +45,44 @@ final class TerminalInboxUITests: XCTestCase {
             "Disconnected"
         )
     }
+
+    func testInboxFixtureSwipeUnreadMarksWorkspaceUnread() {
+        let app = XCUIApplication()
+        app.launchEnvironment["CMUX_UITEST_TERMINAL_INBOX_FIXTURE"] = "1"
+        app.launch()
+
+        let olderWorkspace = app.buttons["terminal.workspace.\(Fixture.olderWorkspaceID)"]
+        XCTAssertTrue(olderWorkspace.waitForExistence(timeout: 6), "Expected older workspace row")
+
+        olderWorkspace.swipeRight()
+
+        let toggleUnread = app.buttons["terminal.workspace.action.toggleUnread.\(Fixture.olderWorkspaceID)"]
+        XCTAssertTrue(toggleUnread.waitForExistence(timeout: 2), "Expected unread swipe action")
+        toggleUnread.tap()
+
+        XCTAssertTrue(
+            app.otherElements["terminal.workspace.unread.\(Fixture.olderWorkspaceID)"].waitForExistence(timeout: 2),
+            "Expected unread badge after toggling unread"
+        )
+    }
+
+    func testInboxFixtureSwipeDeleteRemovesWorkspace() {
+        let app = XCUIApplication()
+        app.launchEnvironment["CMUX_UITEST_TERMINAL_INBOX_FIXTURE"] = "1"
+        app.launch()
+
+        let olderWorkspace = app.buttons["terminal.workspace.\(Fixture.olderWorkspaceID)"]
+        XCTAssertTrue(olderWorkspace.waitForExistence(timeout: 6), "Expected older workspace row")
+
+        olderWorkspace.swipeLeft()
+
+        let deleteAction = app.buttons["terminal.workspace.action.delete.\(Fixture.olderWorkspaceID)"]
+        XCTAssertTrue(deleteAction.waitForExistence(timeout: 2), "Expected delete swipe action")
+        deleteAction.tap()
+
+        XCTAssertFalse(
+            olderWorkspace.waitForExistence(timeout: 2),
+            "Expected deleted workspace to disappear from the inbox"
+        )
+    }
 }

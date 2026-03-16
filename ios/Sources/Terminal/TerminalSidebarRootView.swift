@@ -120,6 +120,7 @@ struct TerminalSidebarRootView: View {
                                         )
                                     }
                                     .tint(.blue)
+                                    .accessibilityIdentifier("terminal.workspace.action.toggleUnread.\(workspace.id.uuidString)")
                                 }
                                 .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                                     Button(role: .destructive) {
@@ -127,6 +128,7 @@ struct TerminalSidebarRootView: View {
                                     } label: {
                                         Label(TerminalHomeStrings.deleteAction, systemImage: "trash")
                                     }
+                                    .accessibilityIdentifier("terminal.workspace.action.delete.\(workspace.id.uuidString)")
                                 }
                             }
                         }

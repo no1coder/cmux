@@ -85,7 +85,7 @@ Convex conversation/task flows stay in repo as legacy code paths and can be reac
 - [x] iPhone build/install run with sidebar + terminal visible.
 - [x] Simulator unit tests pass for the iOS app target.
 - [x] Reconnect banner and recovery flow have a dedicated UI test fixture path.
-- [x] Inbox list ordering, unread badges, and workspace status labels have a dedicated UI test fixture path.
+- [x] Inbox list ordering, unread badges, status labels, and swipe actions have a dedicated UI test fixture path.
 - [x] Network loss restoration and reachable path changes reconnect the selected workspace, including in-flight connects, in unit tests.
 - [x] Direct daemon connect and handshake timeouts fail fast instead of hanging the selected workspace in unit tests.
 - [x] SSH remote-daemon bootstrap times out instead of hanging the workspace during fallback setup in unit tests.
