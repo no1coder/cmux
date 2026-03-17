@@ -1014,7 +1014,7 @@ final class TerminalFontZoomShortcutUITests: XCTestCase {
     override func setUp() {
         super.setUp()
         continueAfterFailure = false
-        launchTag = "ui-tests-terminal-font-zoom-\(UUID().uuidString)"
+        launchTag = "ui-tests-terminal-font-zoom-\(UUID().uuidString.prefix(8))"
         socketPath = "/tmp/cmux-ui-test-terminal-font-zoom-\(UUID().uuidString).sock"
         try? FileManager.default.removeItem(atPath: socketPath)
     }
