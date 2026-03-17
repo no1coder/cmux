@@ -1736,6 +1736,8 @@ class TerminalController {
             return v2Result(id: id, self.v2WorkspacePrevious(params: params))
         case "workspace.last":
             return v2Result(id: id, self.v2WorkspaceLast(params: params))
+        case "workspace.viewport.pan":
+            return v2Result(id: id, self.v2WorkspaceViewportPan(params: params))
 
         // Settings
         case "settings.open":
@@ -2106,6 +2108,7 @@ class TerminalController {
             "workspace.next",
             "workspace.previous",
             "workspace.last",
+            "workspace.viewport.pan",
             "settings.open",
             "feedback.open",
             "feedback.submit",
@@ -3785,6 +3788,18 @@ class TerminalController {
                 return
             }
 
+            if ws.bonsplitController.layoutStyle == .paperCanvas, direction.orientation == .vertical {
+                result = .err(
+                    code: "not_supported",
+                    message: "Vertical pane splits are not supported in horizontal pane-strip workspaces",
+                    data: [
+                        "workspace_id": ws.id.uuidString,
+                        "direction": direction.debugLabel
+                    ]
+                )
+                return
+            }
+
             if let newId = tabManager.newSplit(
                 tabId: ws.id,
                 surfaceId: targetSurfaceId,
@@ -4806,6 +4821,18 @@ class TerminalController {
                 return
             }
 
+            if ws.bonsplitController.layoutStyle == .paperCanvas, orientation == .vertical {
+                result = .err(
+                    code: "not_supported",
+                    message: "Vertical pane splits are not supported in horizontal pane-strip workspaces",
+                    data: [
+                        "workspace_id": ws.id.uuidString,
+                        "direction": direction.debugLabel
+                    ]
+                )
+                return
+            }
+
             let newPanelId: UUID?
             if panelType == .browser {
                 newPanelId = ws.newBrowserSplit(
@@ -5080,6 +5107,71 @@ class TerminalController {
                 "new_divider_position": clamped
             ])
         }
+        return result
+    }
+
+    private func v2WorkspaceViewportPan(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+
+        let dx = v2Int(params, "dx") ?? 0
+        let dy = v2Int(params, "dy") ?? 0
+        guard dx != 0 || dy != 0 else {
+            return .err(code: "invalid_params", message: "dx or dy must be non-zero", data: nil)
+        }
+
+        var result: V2CallResult = .err(code: "internal_error", message: "Failed to pan workspace viewport", data: nil)
+        v2MainSync {
+            guard let ws = v2ResolveWorkspace(params: params, tabManager: tabManager) else {
+                result = .err(code: "not_found", message: "Workspace not found", data: nil)
+                return
+            }
+
+            guard ws.bonsplitController.layoutStyle == .paperCanvas else {
+                result = .err(
+                    code: "not_supported",
+                    message: "Workspace viewport panning is only available in paper canvas layout",
+                    data: ["workspace_id": ws.id.uuidString]
+                )
+                return
+            }
+
+            guard ws.bonsplitController.panPaperCanvasViewport(
+                by: CGSize(width: dx, height: dy),
+                notify: true
+            ),
+            let layout = ws.bonsplitController.paperCanvasLayout() else {
+                result = .err(code: "internal_error", message: "Failed to pan paper canvas viewport", data: nil)
+                return
+            }
+
+            let windowId = v2ResolveWindowId(tabManager: tabManager)
+            result = .ok([
+                "window_id": v2OrNull(windowId?.uuidString),
+                "window_ref": v2Ref(kind: .window, uuid: windowId),
+                "workspace_id": ws.id.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: ws.id),
+                "layout_style": "paperCanvas",
+                "delta": [
+                    "x": dx,
+                    "y": dy
+                ],
+                "viewport_origin": [
+                    "x": layout.viewportOrigin.x,
+                    "y": layout.viewportOrigin.y
+                ],
+                "canvas_bounds": [
+                    "x": layout.canvasBounds.minX,
+                    "y": layout.canvasBounds.minY,
+                    "width": layout.canvasBounds.width,
+                    "height": layout.canvasBounds.height
+                ],
+                "focused_pane_id": v2OrNull(layout.focusedPaneId?.id.uuidString),
+                "focused_pane_ref": v2Ref(kind: .pane, uuid: layout.focusedPaneId?.id)
+            ])
+        }
+
         return result
     }
 

@@ -2309,6 +2309,70 @@ final class Workspace: Identifiable, ObservableObject {
         return newPanel
     }
 
+    /// Insert a new terminal pane to the right of the source pane without shrinking it.
+    @discardableResult
+    func openTerminalPaneRight(
+        from panelId: UUID,
+        focus: Bool = true
+    ) -> TerminalPanel? {
+        guard let paneId = paneId(forPanelId: panelId) else { return nil }
+        let inheritedConfig = inheritedTerminalConfig(preferredPanelId: panelId, inPane: paneId)
+
+        let splitWorkingDirectory: String? = panelDirectories[panelId]
+            ?? (currentDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? nil : currentDirectory)
+#if DEBUG
+        dlog("openPane.cwd panelId=\(panelId.uuidString.prefix(5)) panelDir=\(panelDirectories[panelId] ?? "nil") currentDir=\(currentDirectory) resolved=\(splitWorkingDirectory ?? "nil")")
+#endif
+
+        let newPanel = TerminalPanel(
+            workspaceId: id,
+            context: GHOSTTY_SURFACE_CONTEXT_SPLIT,
+            configTemplate: inheritedConfig,
+            workingDirectory: splitWorkingDirectory,
+            portOrdinal: portOrdinal
+        )
+        panels[newPanel.id] = newPanel
+        panelTitles[newPanel.id] = newPanel.displayTitle
+        seedTerminalInheritanceFontPoints(panelId: newPanel.id, configTemplate: inheritedConfig)
+
+        let newTab = PaneKit.Tab(
+            id: TabID(uuid: newPanel.id),
+            title: newPanel.displayTitle,
+            icon: newPanel.displayIcon,
+            kind: SurfaceKind.terminal,
+            isDirty: newPanel.isDirty,
+            isPinned: false
+        )
+        surfaceIdToPanelId[newTab.id] = newPanel.id
+        let previousFocusedPanelId = focusedPanelId
+        let previousHostedView = focusedTerminalPanel?.hostedView
+
+        guard bonsplitController.openPaperCanvasPaneRight(paneId, withTab: newTab) != nil else {
+            panels.removeValue(forKey: newPanel.id)
+            panelTitles.removeValue(forKey: newPanel.id)
+            surfaceIdToPanelId.removeValue(forKey: newTab.id)
+            terminalInheritanceFontPointsByPanelId.removeValue(forKey: newPanel.id)
+            return nil
+        }
+
+        if focus {
+            previousHostedView?.suppressReparentFocus()
+            focusPanel(newPanel.id, previousHostedView: previousHostedView)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                previousHostedView?.clearSuppressReparentFocus()
+            }
+        } else {
+            preserveFocusAfterNonFocusSplit(
+                preferredPanelId: previousFocusedPanelId,
+                splitPanelId: newPanel.id,
+                previousHostedView: previousHostedView
+            )
+        }
+
+        return newPanel
+    }
+
     /// Create a new surface (nested tab) in the specified pane with a terminal panel.
     /// - Parameter focus: nil = focus only if the target pane is already focused (default UI behavior),
     ///                    true = force focus/selection of the new surface,
@@ -5361,6 +5425,10 @@ extension Workspace: BonsplitDelegate {
 
     func splitTabBar(_ controller: BonsplitController, didChangeGeometry snapshot: LayoutSnapshot) {
         _ = snapshot
+        // Paper-canvas motion is driven by SwiftUI layout and layer presentation, so portal-hosted
+        // terminals need an explicit external geometry sync on each geometry tick to stay aligned
+        // with their animated pane anchors.
+        TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronizeForAllWindows()
         scheduleTerminalGeometryReconcile()
         if !isDetachingCloseTransaction {
             scheduleFocusReconcile()

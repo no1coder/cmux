@@ -50,4 +50,10 @@ enum TabBarMetrics {
 
     /// Duration for split entry animation (fast and snappy like Hyprland)
     static let splitAnimationDuration: Double = 0.15
+
+    // MARK: - Paper Canvas
+
+    static let paperCanvasViewportAnimationDuration: Double = 0.18
+    static let paperCanvasOverflowHintWidth: CGFloat = 28
+    static let paperCanvasOverflowHintIconSize: CGFloat = 11
 }

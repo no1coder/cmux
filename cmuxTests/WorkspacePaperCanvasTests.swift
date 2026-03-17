@@ -31,9 +31,17 @@ final class WorkspacePaperCanvasTests: XCTestCase {
     func testSessionSnapshotRoundTripPreservesPaperPaneFramesAndViewport() throws {
         let workspace = Workspace()
         guard let rootPanelId = workspace.focusedPanelId,
-              let rightPanel = workspace.newTerminalSplit(from: rootPanelId, orientation: .horizontal),
-              workspace.newTerminalSplit(from: rightPanel.id, orientation: .vertical) != nil,
-              let originalLayout = workspace.bonsplitController.paperCanvasLayout() else {
+              workspace.newTerminalSplit(from: rootPanelId, orientation: .horizontal) != nil else {
+            XCTFail("Expected paper layout setup to succeed")
+            return
+        }
+        XCTAssertTrue(
+            workspace.bonsplitController.panPaperCanvasViewport(
+                by: CGSize(width: 220, height: 0),
+                notify: false
+            )
+        )
+        guard let originalLayout = workspace.bonsplitController.paperCanvasLayout() else {
             XCTFail("Expected paper layout setup to succeed")
             return
         }
@@ -129,14 +137,13 @@ final class WorkspacePaperCanvasTests: XCTestCase {
         XCTAssertEqual(layout.panes.count, 2)
     }
 
-    func testOpenBrowserSplitRightReusesTopRightPaneInPaperCanvas() throws {
+    func testOpenBrowserSplitRightReusesRightmostPaneInPaperCanvas() throws {
         let manager = TabManager()
         guard let workspace = manager.selectedWorkspace,
               let leftPanelId = workspace.focusedPanelId,
-              let topRightPanel = workspace.newTerminalSplit(from: leftPanelId, orientation: .horizontal),
-              workspace.newTerminalSplit(from: topRightPanel.id, orientation: .vertical) != nil,
-              let topRightPaneId = workspace.paneId(forPanelId: topRightPanel.id),
-              let url = URL(string: "https://example.com/paper-top-right") else {
+              let rightPanel = workspace.newTerminalSplit(from: leftPanelId, orientation: .horizontal),
+              let rightPaneId = workspace.paneId(forPanelId: rightPanel.id),
+              let url = URL(string: "https://example.com/paper-right") else {
             XCTFail("Expected paper split setup")
             return
         }
@@ -154,6 +161,48 @@ final class WorkspacePaperCanvasTests: XCTestCase {
         }
 
         XCTAssertEqual(workspace.bonsplitController.allPaneIds.count, initialPaneCount)
-        XCTAssertEqual(workspace.paneId(forPanelId: browserPanelId), topRightPaneId)
+        XCTAssertEqual(workspace.paneId(forPanelId: browserPanelId), rightPaneId)
+    }
+
+    func testWorkspaceSplitRightPreservesSurfaceTabsInSourcePane() {
+        let workspace = Workspace()
+        guard let sourcePanelId = workspace.focusedPanelId,
+              let sourcePaneId = workspace.paneId(forPanelId: sourcePanelId) else {
+            XCTFail("Expected initial focused panel")
+            return
+        }
+
+        XCTAssertNotNil(workspace.newTerminalSurface(inPane: sourcePaneId, focus: false))
+        let sourcePaneTabCountBefore = workspace.bonsplitController.tabs(inPane: sourcePaneId).count
+
+        XCTAssertNotNil(workspace.newTerminalSplit(from: sourcePanelId, orientation: .horizontal))
+        XCTAssertEqual(workspace.bonsplitController.tabs(inPane: sourcePaneId).count, sourcePaneTabCountBefore)
+        XCTAssertEqual(workspace.bonsplitController.allPaneIds.count, 2)
+    }
+
+    func testWorkspaceOpenTerminalPaneRightKeepsSourcePaneWidthAndRevealsNewPane() {
+        let workspace = Workspace()
+        workspace.bonsplitController.setContainerFrame(CGRect(x: 0, y: 0, width: 1200, height: 800))
+
+        guard let sourcePanelId = workspace.focusedPanelId,
+              let sourcePaneId = workspace.paneId(forPanelId: sourcePanelId),
+              let sourceFrameBefore = workspace.bonsplitController.paperCanvasLayout()?.panes.first(where: { $0.paneId == sourcePaneId })?.frame else {
+            XCTFail("Expected initial source pane")
+            return
+        }
+
+        guard let newPanel = workspace.openTerminalPaneRight(from: sourcePanelId),
+              let newPaneId = workspace.paneId(forPanelId: newPanel.id),
+              let layout = workspace.bonsplitController.paperCanvasLayout(),
+              let sourceFrameAfter = layout.panes.first(where: { $0.paneId == sourcePaneId })?.frame,
+              let newFrame = layout.panes.first(where: { $0.paneId == newPaneId })?.frame else {
+            XCTFail("Expected inserted right pane")
+            return
+        }
+
+        XCTAssertEqual(layout.panes.count, 2)
+        XCTAssertEqual(sourceFrameAfter.width, sourceFrameBefore.width, accuracy: 0.001)
+        XCTAssertEqual(newFrame.width, 800, accuracy: 1.0)
+        XCTAssertEqual(layout.viewportOrigin.x, newFrame.maxX - 1200, accuracy: 1.0)
     }
 }

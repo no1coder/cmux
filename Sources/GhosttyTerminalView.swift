@@ -67,6 +67,26 @@ private func cmuxScalarHex(_ value: String?) -> String {
         .map { String(format: "%04X", $0.value) }
         .joined(separator: ",")
 }
+
+private func cmuxSurfaceBootstrapDebugEnabled(
+    environment: [String: String] = ProcessInfo.processInfo.environment
+) -> Bool {
+    environment["CMUX_SURFACE_BOOTSTRAP_DEBUG"] == "1" ||
+        environment["CMUX_PANE_STRIP_MOTION_SETUP"] == "1" ||
+        environment["CMUX_UI_TEST_PANE_STRIP_MOTION_SETUP"] == "1"
+}
+
+private func cmuxSurfaceBootstrapLog(_ message: String) {
+    guard cmuxSurfaceBootstrapDebugEnabled() else { return }
+    NSLog("[SURFACEBOOT] %@", message)
+}
+
+private func cmuxSurfaceBootstrapFlag(
+    _ key: String,
+    environment: [String: String] = ProcessInfo.processInfo.environment
+) -> Bool {
+    environment[key] == "1"
+}
 #endif
 
 private enum GhosttyPasteboardHelper {
@@ -2806,7 +2826,17 @@ final class TerminalSurface: Identifiable, ObservableObject {
         let terminfo = getenv("TERMINFO").flatMap { String(cString: $0) } ?? "(unset)"
         let xdg = getenv("XDG_DATA_DIRS").flatMap { String(cString: $0) } ?? "(unset)"
         let manpath = getenv("MANPATH").flatMap { String(cString: $0) } ?? "(unset)"
+        let initialBackingSize = view.convertToBacking(NSRect(origin: .zero, size: view.bounds.size)).size
+        let windowFrame = view.window?.frame ?? .zero
         Self.surfaceLog("createSurface start surface=\(id.uuidString) tab=\(tabId.uuidString) bounds=\(view.bounds) inWindow=\(view.window != nil) resources=\(resourcesDir) terminfo=\(terminfo) xdg=\(xdg) manpath=\(manpath)")
+        cmuxSurfaceBootstrapLog(
+            "create.start surface=\(id.uuidString.prefix(5)) " +
+            "bounds=\(String(format: "%.1fx%.1f", view.bounds.width, view.bounds.height)) " +
+            "frame=\(String(format: "%.1fx%.1f@%.1f,%.1f", view.frame.width, view.frame.height, view.frame.minX, view.frame.minY)) " +
+            "backing=\(String(format: "%.1fx%.1f", initialBackingSize.width, initialBackingSize.height)) " +
+            "window=\(view.window != nil ? 1 : 0) " +
+            "windowFrame=\(String(format: "%.1fx%.1f@%.1f,%.1f", windowFrame.width, windowFrame.height, windowFrame.minX, windowFrame.minY))"
+        )
         #endif
 
         guard let app = GhosttyApp.shared.app else {
@@ -2819,7 +2849,12 @@ final class TerminalSurface: Identifiable, ObservableObject {
 
         let scaleFactors = scaleFactors(for: view)
 
-        var surfaceConfig = configTemplate ?? ghostty_surface_config_new()
+        let bootstrapEnvironment = ProcessInfo.processInfo.environment
+        let disableTemplate = cmuxSurfaceBootstrapFlag("CMUX_SURFACE_TEST_DISABLE_TEMPLATE", environment: bootstrapEnvironment)
+        let disableEnvVars = cmuxSurfaceBootstrapFlag("CMUX_SURFACE_TEST_DISABLE_ENV", environment: bootstrapEnvironment)
+        let disableWorkingDirectory = cmuxSurfaceBootstrapFlag("CMUX_SURFACE_TEST_DISABLE_WD", environment: bootstrapEnvironment)
+
+        var surfaceConfig = disableTemplate ? ghostty_surface_config_new() : (configTemplate ?? ghostty_surface_config_new())
         surfaceConfig.platform_tag = GHOSTTY_PLATFORM_MACOS
         surfaceConfig.platform = ghostty_platform_u(macos: ghostty_platform_macos_s(
             nsview: Unmanaged.passUnretained(view).toOpaque()
@@ -2835,6 +2870,13 @@ final class TerminalSurface: Identifiable, ObservableObject {
         dlog(
             "zoom.create surface=\(id.uuidString.prefix(5)) context=\(cmuxSurfaceContextName(surfaceContext)) " +
             "templateFont=\(templateFontText)"
+        )
+        cmuxSurfaceBootstrapLog(
+            "create.config surface=\(id.uuidString.prefix(5)) " +
+            "template=\(disableTemplate ? 0 : (configTemplate == nil ? 0 : 1)) " +
+            "disableEnv=\(disableEnvVars ? 1 : 0) disableWd=\(disableWorkingDirectory ? 1 : 0) " +
+            "wd=\((workingDirectory?.isEmpty == false && !disableWorkingDirectory) ? 1 : 0) " +
+            "context=\(cmuxSurfaceContextName(surfaceContext))"
         )
 #endif
         var envVars: [ghostty_env_var_s] = []
@@ -2939,7 +2981,7 @@ final class TerminalSurface: Identifiable, ObservableObject {
             }
         }
 
-        if !env.isEmpty {
+        if !env.isEmpty, !disableEnvVars {
             envVars.reserveCapacity(env.count)
             envStorage.reserveCapacity(env.count)
             for (key, value) in env {
@@ -2962,7 +3004,7 @@ final class TerminalSurface: Identifiable, ObservableObject {
             }
         }
 
-        if let workingDirectory, !workingDirectory.isEmpty {
+        if !disableWorkingDirectory, let workingDirectory, !workingDirectory.isEmpty {
             workingDirectory.withCString { cWorkingDir in
                 surfaceConfig.working_directory = cWorkingDir
                 createSurface()
@@ -2976,6 +3018,11 @@ final class TerminalSurface: Identifiable, ObservableObject {
             surfaceCallbackContext = nil
             print("Failed to create ghostty surface")
             #if DEBUG
+            cmuxSurfaceBootstrapLog(
+                "create.failed surface=\(id.uuidString.prefix(5)) " +
+                "bounds=\(String(format: "%.1fx%.1f", view.bounds.width, view.bounds.height)) " +
+                "frame=\(String(format: "%.1fx%.1f@%.1f,%.1f", view.frame.width, view.frame.height, view.frame.minX, view.frame.minY))"
+            )
             Self.surfaceLog("createSurface FAILED surface=\(id.uuidString): ghostty_surface_new returned nil")
             if let cfg = GhosttyApp.shared.config {
                 let count = Int(ghostty_config_diagnostics_count(cfg))
@@ -3010,6 +3057,14 @@ final class TerminalSurface: Identifiable, ObservableObject {
         let backingSize = view.convertToBacking(NSRect(origin: .zero, size: view.bounds.size)).size
         let wpx = pixelDimension(from: backingSize.width)
         let hpx = pixelDimension(from: backingSize.height)
+        #if DEBUG
+        cmuxSurfaceBootstrapLog(
+            "create.size surface=\(id.uuidString.prefix(5)) " +
+            "scale=\(String(format: "%.3f/%.3f/%.3f", scaleFactors.x, scaleFactors.y, scaleFactors.layer)) " +
+            "backing=\(String(format: "%.1fx%.1f", backingSize.width, backingSize.height)) " +
+            "pixels=\(wpx)x\(hpx)"
+        )
+        #endif
         if wpx > 0, hpx > 0 {
             ghostty_surface_set_size(createdSurface, wpx, hpx)
             lastPixelWidth = wpx
@@ -3477,8 +3532,8 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     }
 
     private func setup() {
-        // Only enable our instrumented CAMetalLayer in targeted debug/test scenarios.
-        // The lock in GhosttyMetalLayer.nextDrawable() adds overhead we don't want in normal runs.
+        // Keep the hosted terminal layer-backed up front. The current embedder still relies on
+        // this to bootstrap the Ghostty surface correctly, including in the VM verification path.
         wantsLayer = true
         layer?.masksToBounds = true
         installEventMonitor()
@@ -3770,6 +3825,17 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     private func updateSurfaceSize(size: CGSize? = nil) -> Bool {
         guard let terminalSurface = terminalSurface else { return false }
         let size = resolvedSurfaceSize(preferred: size)
+        #if DEBUG
+        if cmuxSurfaceBootstrapDebugEnabled() {
+            cmuxSurfaceBootstrapLog(
+                "resize.begin surface=\(terminalSurface.id.uuidString.prefix(5)) " +
+                "requested=\(String(format: "%.1fx%.1f", size.width, size.height)) " +
+                "bounds=\(String(format: "%.1fx%.1f", bounds.width, bounds.height)) " +
+                "frame=\(String(format: "%.1fx%.1f@%.1f,%.1f", frame.width, frame.height, frame.minX, frame.minY)) " +
+                "window=\(window != nil ? 1 : 0)"
+            )
+        }
+        #endif
         guard size.width > 0 && size.height > 0 else {
 #if DEBUG
             let signature = "nonPositive-\(Int(size.width))x\(Int(size.height))"
@@ -3849,6 +3915,17 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
             width: floor(max(0, backingSize.width)),
             height: floor(max(0, backingSize.height))
         )
+        #if DEBUG
+        if cmuxSurfaceBootstrapDebugEnabled() {
+            cmuxSurfaceBootstrapLog(
+                "resize.apply surface=\(terminalSurface.id.uuidString.prefix(5)) " +
+                "points=\(String(format: "%.1fx%.1f", size.width, size.height)) " +
+                "backing=\(String(format: "%.1fx%.1f", backingSize.width, backingSize.height)) " +
+                "drawable=\(Int(drawablePixelSize.width))x\(Int(drawablePixelSize.height)) " +
+                "scale=\(String(format: "%.3f/%.3f/%.3f", xScale, yScale, layerScale))"
+            )
+        }
+        #endif
         var didChange = false
 
         CATransaction.begin()
@@ -6139,6 +6216,24 @@ final class GhosttySurfaceScrollView: NSView {
         surfaceView.terminalSurface?.forceRefresh(reason: reason)
     }
 
+    /// Detect whether the terminal layer already has usable contents for an initial reveal.
+    /// This is intentionally cheap: avoid pixel sampling and only require non-zero layer
+    /// bounds plus non-empty contents (or a non-zero IOSurface).
+    func hasRenderableSurfaceContentsForReveal() -> Bool {
+        guard let modelLayer = surfaceView.layer else { return false }
+        let layer = modelLayer.presentation() ?? modelLayer
+        guard layer.bounds.width > 1, layer.bounds.height > 1 else { return false }
+        guard let contents = layer.contents else { return false }
+
+        let cf = contents as CFTypeRef
+        guard CFGetTypeID(cf) == IOSurfaceGetTypeID() else {
+            return true
+        }
+
+        let surfaceRef = (contents as! IOSurfaceRef)
+        return IOSurfaceGetWidth(surfaceRef) > 0 && IOSurfaceGetHeight(surfaceRef) > 0
+    }
+
     @discardableResult
     private func synchronizeGeometryAndContent() -> Bool {
         CATransaction.begin()
@@ -7709,6 +7804,29 @@ final class GhosttySurfaceScrollView: NSView {
             layerClass: layerClass,
             layerContentsGravity: layerContentsGravity,
             layerContentsKey: contentsKey
+        )
+    }
+
+    func debugInlineMotionSample(normalizedCrop: CGRect) -> DebugTerminalPortalMotionSample? {
+        guard let window else { return nil }
+        let frameInWindow = convert(bounds, to: nil).integral
+        guard frameInWindow.width > 1, frameInWindow.height > 1 else { return nil }
+
+        let hiddenByHierarchy: Bool = {
+            var current: NSView? = self
+            while let view = current {
+                if view.isHidden { return true }
+                current = view.superview
+            }
+            return false
+        }()
+
+        return DebugTerminalPortalMotionSample(
+            anchorFrameInWindow: frameInWindow,
+            hostedFrameInWindow: frameInWindow,
+            anchorHidden: hiddenByHierarchy,
+            hostedHidden: isHidden || window.occlusionState.contains(.visible) == false,
+            surfaceSample: debugSampleIOSurface(normalizedCrop: normalizedCrop)
         )
     }
 #endif

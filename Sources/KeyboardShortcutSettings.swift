@@ -32,6 +32,7 @@ enum KeyboardShortcutSettings {
         case focusUp
         case focusDown
         case splitRight
+        case openPaneRight
         case splitDown
         case toggleSplitZoom
         case splitBrowserRight
@@ -69,6 +70,7 @@ enum KeyboardShortcutSettings {
             case .focusUp: return String(localized: "shortcut.focusPaneUp.label", defaultValue: "Focus Pane Up")
             case .focusDown: return String(localized: "shortcut.focusPaneDown.label", defaultValue: "Focus Pane Down")
             case .splitRight: return String(localized: "shortcut.splitRight.label", defaultValue: "Split Right")
+            case .openPaneRight: return String(localized: "shortcut.openPaneRight.label", defaultValue: "Open Pane Right")
             case .splitDown: return String(localized: "shortcut.splitDown.label", defaultValue: "Split Down")
             case .toggleSplitZoom: return String(localized: "shortcut.togglePaneZoom.label", defaultValue: "Toggle Pane Zoom")
             case .splitBrowserRight: return String(localized: "shortcut.splitBrowserRight.label", defaultValue: "Split Browser Right")
@@ -100,6 +102,7 @@ enum KeyboardShortcutSettings {
             case .focusUp: return "shortcut.focusUp"
             case .focusDown: return "shortcut.focusDown"
             case .splitRight: return "shortcut.splitRight"
+            case .openPaneRight: return "shortcut.openPaneRight"
             case .splitDown: return "shortcut.splitDown"
             case .toggleSplitZoom: return "shortcut.toggleSplitZoom"
             case .splitBrowserRight: return "shortcut.splitBrowserRight"
@@ -154,6 +157,8 @@ enum KeyboardShortcutSettings {
                 return StoredShortcut(key: "↓", command: true, shift: false, option: true, control: false)
             case .splitRight:
                 return StoredShortcut(key: "d", command: true, shift: false, option: false, control: false)
+            case .openPaneRight:
+                return StoredShortcut(key: "n", command: true, shift: false, option: true, control: false)
             case .splitDown:
                 return StoredShortcut(key: "d", command: true, shift: true, option: false, control: false)
             case .toggleSplitZoom:
@@ -239,6 +244,7 @@ enum KeyboardShortcutSettings {
     static func focusDownShortcut() -> StoredShortcut { shortcut(for: .focusDown) }
 
     static func splitRightShortcut() -> StoredShortcut { shortcut(for: .splitRight) }
+    static func openPaneRightShortcut() -> StoredShortcut { shortcut(for: .openPaneRight) }
     static func splitDownShortcut() -> StoredShortcut { shortcut(for: .splitDown) }
     static func toggleSplitZoomShortcut() -> StoredShortcut { shortcut(for: .toggleSplitZoom) }
     static func splitBrowserRightShortcut() -> StoredShortcut { shortcut(for: .splitBrowserRight) }

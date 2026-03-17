@@ -884,9 +884,110 @@ final class AppDelegateShortcutRoutingTests: XCTestCase {
 #if DEBUG
             XCTAssertTrue(appDelegate.debugHandleCustomShortcut(event: event))
 #else
+        XCTFail("debugHandleCustomShortcut is only available in DEBUG")
+#endif
+        }
+    }
+
+    func testCmdOptionNOpensPaneRightWithoutShrinkingSourcePane() {
+        guard let appDelegate = AppDelegate.shared else {
+            XCTFail("Expected AppDelegate.shared")
+            return
+        }
+
+        let windowId = appDelegate.createMainWindow()
+        defer { closeWindow(withId: windowId) }
+
+        guard let context = waitForFocusedWorkspaceContext(windowId: windowId),
+              let sourcePanelId = context.workspace.focusedPanelId,
+              let sourcePaneId = context.workspace.paneId(forPanelId: sourcePanelId) else {
+            XCTFail("Expected test window and focused workspace pane")
+            return
+        }
+
+        let window = context.window
+        let workspace = context.workspace
+
+        workspace.bonsplitController.setContainerFrame(CGRect(x: 0, y: 0, width: 1200, height: 800))
+        guard let sourceFrameBefore = workspace.bonsplitController.paperCanvasLayout()?.panes.first(where: { $0.paneId == sourcePaneId })?.frame else {
+            XCTFail("Expected source pane frame before shortcut")
+            return
+        }
+
+        withTemporaryShortcut(action: .openPaneRight) {
+            guard let event = makeKeyDownEvent(
+                key: "n",
+                modifiers: [.command, .option],
+                keyCode: 45,
+                windowNumber: window.windowNumber
+            ) else {
+                XCTFail("Failed to construct Cmd+Option+N event")
+                return
+            }
+
+#if DEBUG
+            XCTAssertTrue(appDelegate.debugHandleCustomShortcut(event: event))
+#else
             XCTFail("debugHandleCustomShortcut is only available in DEBUG")
 #endif
         }
+
+        guard let layout = workspace.bonsplitController.paperCanvasLayout(),
+              let sourceFrameAfter = layout.panes.first(where: { $0.paneId == sourcePaneId })?.frame,
+              let focusedPanelId = workspace.focusedPanelId,
+              let newPaneId = workspace.paneId(forPanelId: focusedPanelId),
+              let newFrame = layout.panes.first(where: { $0.paneId == newPaneId })?.frame else {
+            XCTFail("Expected open-pane shortcut to create and focus a right pane")
+            return
+        }
+
+        XCTAssertEqual(layout.panes.count, 2)
+        XCTAssertEqual(sourceFrameAfter.width, sourceFrameBefore.width, accuracy: 0.001)
+        XCTAssertEqual(newFrame.width, 800, accuracy: 1.0)
+        XCTAssertEqual(layout.viewportOrigin.x, newFrame.maxX - 1200, accuracy: 1.0)
+        XCTAssertNotEqual(focusedPanelId, sourcePanelId)
+    }
+
+    func testCmdShiftDDoesNotCreateVerticalPaneInPaperCanvasWorkspace() {
+        guard let appDelegate = AppDelegate.shared else {
+            XCTFail("Expected AppDelegate.shared")
+            return
+        }
+
+        let windowId = appDelegate.createMainWindow()
+        defer { closeWindow(withId: windowId) }
+
+        guard let context = waitForFocusedWorkspaceContext(windowId: windowId) else {
+            XCTFail("Expected test window and selected workspace")
+            return
+        }
+
+        let window = context.window
+        let workspace = context.workspace
+
+        let initialPaneCount = workspace.bonsplitController.allPaneIds.count
+        let initialFocusedPanelId = workspace.focusedPanelId
+
+        withTemporaryShortcut(action: .splitDown) {
+            guard let event = makeKeyDownEvent(
+                key: "d",
+                modifiers: [.command, .shift],
+                keyCode: 2,
+                windowNumber: window.windowNumber
+            ) else {
+                XCTFail("Failed to construct Cmd+Shift+D event")
+                return
+            }
+
+#if DEBUG
+            XCTAssertTrue(appDelegate.debugHandleCustomShortcut(event: event))
+#else
+            XCTFail("debugHandleCustomShortcut is only available in DEBUG")
+#endif
+        }
+
+        XCTAssertEqual(workspace.bonsplitController.allPaneIds.count, initialPaneCount)
+        XCTAssertEqual(workspace.focusedPanelId, initialFocusedPanelId)
     }
 
     func testCmdUnshiftedSymbolDoesNotMatchDigitShortcut() {
@@ -2334,6 +2435,31 @@ final class AppDelegateShortcutRoutingTests: XCTestCase {
     private func window(withId windowId: UUID) -> NSWindow? {
         let identifier = "cmux.main.\(windowId.uuidString)"
         return NSApp.windows.first(where: { $0.identifier?.rawValue == identifier })
+    }
+
+    private func waitForFocusedWorkspaceContext(
+        windowId: UUID,
+        timeout: TimeInterval = 1.0
+    ) -> (window: NSWindow, workspace: Workspace)? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let window = window(withId: windowId),
+               let manager = AppDelegate.shared?.tabManagerFor(windowId: windowId),
+               let workspace = manager.selectedWorkspace,
+               workspace.focusedPanelId != nil {
+                return (window, workspace)
+            }
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+        }
+
+        if let window = window(withId: windowId),
+           let manager = AppDelegate.shared?.tabManagerFor(windowId: windowId),
+           let workspace = manager.selectedWorkspace,
+           workspace.focusedPanelId != nil {
+            return (window, workspace)
+        }
+
+        return nil
     }
 
     private func closeWindow(withId windowId: UUID) {

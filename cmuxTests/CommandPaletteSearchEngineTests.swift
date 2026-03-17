@@ -314,6 +314,44 @@ final class CommandPaletteSearchEngineTests: XCTestCase {
         )
     }
 
+    func testPaneLayoutQueriesDifferentiateOpenPaneRightFromSplitRight() {
+        let entries = [
+            FixtureEntry(
+                id: "palette.openPaneRight",
+                rank: 0,
+                title: "Open Pane Right",
+                searchableTexts: ["Open Pane Right", "Pane Layout", "open", "new", "pane", "right", "terminal"]
+            ),
+            FixtureEntry(
+                id: "palette.terminalSplitRight",
+                rank: 1,
+                title: "Split Right",
+                searchableTexts: ["Split Right", "Terminal Layout", "terminal", "split", "right"]
+            ),
+        ]
+
+        XCTAssertEqual(
+            optimizedResults(entries: entries, query: "new pane").first?.id,
+            "palette.openPaneRight"
+        )
+        XCTAssertEqual(
+            optimizedResults(entries: entries, query: "split right").first?.id,
+            "palette.terminalSplitRight"
+        )
+    }
+
+    func testCommandPaletteShortcutMappingIncludesOpenPaneRight() {
+        XCTAssertEqual(
+            ContentView.commandPaletteShortcutActionForTests(commandId: "palette.openPaneRight"),
+            .openPaneRight
+        )
+        XCTAssertEqual(
+            ContentView.commandPaletteShortcutActionForTests(commandId: "palette.terminalSplitRight"),
+            .splitRight
+        )
+        XCTAssertNil(ContentView.commandPaletteShortcutActionForTests(commandId: "palette.missing"))
+    }
+
     func testSearchRejectsMultipleEditsInCommandWordPrefix() {
         let entries = makeFinderCommandEntries()
 

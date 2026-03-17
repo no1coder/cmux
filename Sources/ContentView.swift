@@ -840,6 +840,12 @@ var fileDropOverlayKey: UInt8 = 0
 private var commandPaletteWindowOverlayKey: UInt8 = 0
 let commandPaletteOverlayContainerIdentifier = NSUserInterfaceItemIdentifier("cmux.commandPalette.overlay.container")
 
+func shouldInstallFileDropOverlay(
+    environment: [String: String] = ProcessInfo.processInfo.environment
+) -> Bool {
+    !SessionRestorePolicy.isRunningUnderAutomatedTests(environment: environment)
+}
+
 enum CommandPaletteOverlayPromotionPolicy {
     static func shouldPromote(previouslyVisible: Bool, isVisible: Bool) -> Bool {
         isVisible && !previouslyVisible
@@ -865,7 +871,7 @@ private final class WindowCommandPaletteOverlayController: NSObject {
     private let containerView = CommandPaletteOverlayContainerView(frame: .zero)
     private let hostingView = NSHostingView(rootView: AnyView(EmptyView()))
     private var installConstraints: [NSLayoutConstraint] = []
-    private weak var installedThemeFrame: NSView?
+    private weak var installedContainerView: NSView?
     private var focusLockTimer: DispatchSourceTimer?
     private var scheduledFocusWorkItem: DispatchWorkItem?
     private var isPaletteVisible = false
@@ -899,14 +905,13 @@ private final class WindowCommandPaletteOverlayController: NSObject {
     @discardableResult
     private func ensureInstalled() -> Bool {
         guard let window,
-              let contentView = window.contentView,
-              let themeFrame = contentView.superview else { return false }
+              let contentView = window.contentView else { return false }
 
-        if containerView.superview !== themeFrame {
+        if containerView.superview !== contentView {
             NSLayoutConstraint.deactivate(installConstraints)
             installConstraints.removeAll()
             containerView.removeFromSuperview()
-            themeFrame.addSubview(containerView, positioned: .above, relativeTo: nil)
+            contentView.addSubview(containerView, positioned: .above, relativeTo: nil)
             installConstraints = [
                 containerView.topAnchor.constraint(equalTo: contentView.topAnchor),
                 containerView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
@@ -914,16 +919,16 @@ private final class WindowCommandPaletteOverlayController: NSObject {
                 containerView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
             ]
             NSLayoutConstraint.activate(installConstraints)
-            installedThemeFrame = themeFrame
+            installedContainerView = contentView
         }
 
         return true
     }
 
     private func promoteOverlayAboveSiblingsIfNeeded() {
-        guard let themeFrame = installedThemeFrame,
-              containerView.superview === themeFrame else { return }
-        themeFrame.addSubview(containerView, positioned: .above, relativeTo: nil)
+        guard let container = installedContainerView,
+              containerView.superview === container else { return }
+        container.addSubview(containerView, positioned: .above, relativeTo: nil)
     }
 
     private func isPaletteResponder(_ responder: NSResponder?) -> Bool {
@@ -1282,11 +1287,11 @@ enum WorkspaceMountPolicy {
     }
 }
 
-/// Installs a FileDropOverlayView on the window's theme frame for Finder file drag support.
+/// Installs a FileDropOverlayView on the window content view for Finder file drag support.
 func installFileDropOverlay(on window: NSWindow, tabManager: TabManager) {
-    guard objc_getAssociatedObject(window, &fileDropOverlayKey) == nil,
-          let contentView = window.contentView,
-          let themeFrame = contentView.superview else { return }
+    guard shouldInstallFileDropOverlay(),
+          objc_getAssociatedObject(window, &fileDropOverlayKey) == nil,
+          let contentView = window.contentView else { return }
 
     let overlay = FileDropOverlayView(frame: contentView.frame)
     overlay.translatesAutoresizingMaskIntoConstraints = false
@@ -1297,7 +1302,7 @@ func installFileDropOverlay(on window: NSWindow, tabManager: TabManager) {
         }
     }
 
-    themeFrame.addSubview(overlay, positioned: .above, relativeTo: contentView)
+    contentView.addSubview(overlay, positioned: .above, relativeTo: nil)
     NSLayoutConstraint.activate([
         overlay.topAnchor.constraint(equalTo: contentView.topAnchor),
         overlay.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
@@ -1534,6 +1539,7 @@ struct ContentView: View {
         static let workspaceHasBelow = "workspace.hasBelow"
         static let workspaceHasUnread = "workspace.hasUnread"
         static let workspaceHasRead = "workspace.hasRead"
+        static let workspaceSupportsVerticalPaneSplit = "workspace.supportsVerticalPaneSplit"
 
         static let hasFocusedPanel = "panel.hasFocus"
         static let panelName = "panel.name"
@@ -2558,9 +2564,11 @@ struct ContentView: View {
         })
 
         view = AnyView(view.background(WindowAccessor(dedupeByWindow: false) { window in
-            MainActor.assumeIsolated {
+            let overlayRootView = AnyView(commandPaletteOverlay)
+            let overlayIsVisible = isCommandPalettePresented
+            DispatchQueue.main.async {
                 let overlayController = commandPaletteWindowOverlayController(for: window)
-                overlayController.update(rootView: AnyView(commandPaletteOverlay), isVisible: isCommandPalettePresented)
+                overlayController.update(rootView: overlayRootView, isVisible: overlayIsVisible)
             }
         }))
 
@@ -3990,6 +3998,12 @@ struct ContentView: View {
     }
 
     private func commandPaletteShortcutAction(for commandId: String) -> KeyboardShortcutSettings.Action? {
+        Self.commandPaletteShortcutAction(commandId: commandId)
+    }
+
+    nonisolated private static func commandPaletteShortcutAction(
+        commandId: String
+    ) -> KeyboardShortcutSettings.Action? {
         switch commandId {
         case "palette.newWorkspace":
             return .newTab
@@ -4029,6 +4043,8 @@ struct ContentView: View {
             return .splitBrowserRight
         case "palette.browserSplitDown", "palette.terminalSplitBrowserDown":
             return .splitBrowserDown
+        case "palette.openPaneRight":
+            return .openPaneRight
         case "palette.terminalSplitRight":
             return .splitRight
         case "palette.terminalSplitDown":
@@ -4040,6 +4056,12 @@ struct ContentView: View {
         default:
             return nil
         }
+    }
+
+    nonisolated static func commandPaletteShortcutActionForTests(
+        commandId: String
+    ) -> KeyboardShortcutSettings.Action? {
+        commandPaletteShortcutAction(commandId: commandId)
     }
 
     private func commandPaletteStaticShortcutHint(for commandId: String) -> String? {
@@ -4114,6 +4136,10 @@ struct ContentView: View {
                 CommandPaletteContextKeys.workspaceHasRead,
                 notificationStore.notifications.contains { $0.tabId == workspace.id && $0.isRead }
             )
+            snapshot.setBool(
+                CommandPaletteContextKeys.workspaceSupportsVerticalPaneSplit,
+                workspace.bonsplitController.layoutStyle != .paperCanvas
+            )
         }
 
         if let panelContext = focusedPanelContext {
@@ -4174,6 +4200,10 @@ struct ContentView: View {
         func terminalPanelSubtitle(_ context: CommandPaletteContextSnapshot) -> String {
             let name = context.string(CommandPaletteContextKeys.panelName) ?? String(localized: "commandPalette.subtitle.tabFallback", defaultValue: "Tab")
             return String(localized: "commandPalette.subtitle.terminalWithName", defaultValue: "Terminal • \(name)")
+        }
+
+        func supportsVerticalPaneSplit(_ context: CommandPaletteContextSnapshot) -> Bool {
+            context.bool(CommandPaletteContextKeys.workspaceSupportsVerticalPaneSplit)
         }
 
         var contributions: [CommandPaletteCommandContribution] = []
@@ -4681,7 +4711,10 @@ struct ContentView: View {
                 title: constant(String(localized: "command.browserSplitDown.title", defaultValue: "Split Browser Down")),
                 subtitle: constant(String(localized: "command.browserSplitDown.subtitle", defaultValue: "Browser Layout")),
                 keywords: ["browser", "split", "down"],
-                when: { $0.bool(CommandPaletteContextKeys.panelIsBrowser) }
+                when: {
+                    $0.bool(CommandPaletteContextKeys.panelIsBrowser)
+                        && supportsVerticalPaneSplit($0)
+                }
             )
         )
         contributions.append(
@@ -4783,6 +4816,15 @@ struct ContentView: View {
         )
         contributions.append(
             CommandPaletteCommandContribution(
+                commandId: "palette.openPaneRight",
+                title: constant(String(localized: "command.openPaneRight.title", defaultValue: "Open Pane Right")),
+                subtitle: constant(String(localized: "command.openPaneRight.subtitle", defaultValue: "Pane Layout")),
+                keywords: ["open", "new", "pane", "right", "terminal"],
+                when: { $0.bool(CommandPaletteContextKeys.hasFocusedPanel) }
+            )
+        )
+        contributions.append(
+            CommandPaletteCommandContribution(
                 commandId: "palette.terminalSplitRight",
                 title: constant(String(localized: "command.terminalSplitRight.title", defaultValue: "Split Right")),
                 subtitle: constant(String(localized: "command.terminalSplitRight.subtitle", defaultValue: "Terminal Layout")),
@@ -4796,7 +4838,10 @@ struct ContentView: View {
                 title: constant(String(localized: "command.terminalSplitDown.title", defaultValue: "Split Down")),
                 subtitle: constant(String(localized: "command.terminalSplitDown.subtitle", defaultValue: "Terminal Layout")),
                 keywords: ["terminal", "split", "down"],
-                when: { $0.bool(CommandPaletteContextKeys.panelIsTerminal) }
+                when: {
+                    $0.bool(CommandPaletteContextKeys.panelIsTerminal)
+                        && supportsVerticalPaneSplit($0)
+                }
             )
         )
         contributions.append(
@@ -4814,7 +4859,10 @@ struct ContentView: View {
                 title: constant(String(localized: "command.terminalSplitBrowserDown.title", defaultValue: "Split Browser Down")),
                 subtitle: constant(String(localized: "command.terminalSplitBrowserDown.subtitle", defaultValue: "Terminal Layout")),
                 keywords: ["terminal", "split", "browser", "down"],
-                when: { $0.bool(CommandPaletteContextKeys.panelIsTerminal) }
+                when: {
+                    $0.bool(CommandPaletteContextKeys.panelIsTerminal)
+                        && supportsVerticalPaneSplit($0)
+                }
             )
         )
         contributions.append(
@@ -5139,6 +5187,9 @@ struct ContentView: View {
         }
         registry.register(commandId: "palette.terminalUseSelectionForFind") {
             tabManager.searchSelection()
+        }
+        registry.register(commandId: "palette.openPaneRight") {
+            _ = tabManager.openPaneRight()
         }
         registry.register(commandId: "palette.terminalSplitRight") {
             tabManager.createSplit(direction: .right)

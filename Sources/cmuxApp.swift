@@ -27,6 +27,7 @@ struct cmuxApp: App {
     @AppStorage(KeyboardShortcutSettings.Action.nextSidebarTab.defaultsKey) private var nextWorkspaceShortcutData = Data()
     @AppStorage(KeyboardShortcutSettings.Action.prevSidebarTab.defaultsKey) private var prevWorkspaceShortcutData = Data()
     @AppStorage(KeyboardShortcutSettings.Action.splitRight.defaultsKey) private var splitRightShortcutData = Data()
+    @AppStorage(KeyboardShortcutSettings.Action.openPaneRight.defaultsKey) private var openPaneRightShortcutData = Data()
     @AppStorage(KeyboardShortcutSettings.Action.splitDown.defaultsKey) private var splitDownShortcutData = Data()
     @AppStorage(KeyboardShortcutSettings.Action.toggleBrowserDeveloperTools.defaultsKey)
     private var toggleBrowserDeveloperToolsShortcutData = Data()
@@ -91,22 +92,27 @@ struct cmuxApp: App {
         let fileManager = FileManager.default
         let ghosttyAppResources = "/Applications/Ghostty.app/Contents/Resources/ghostty"
         let bundledGhosttyURL = Bundle.main.resourceURL?.appendingPathComponent("ghostty")
+        let bundledTerminfoURL = Bundle.main.resourceURL?.appendingPathComponent("terminfo")
         var resolvedResourcesDir: String?
 
-        if getenv("GHOSTTY_RESOURCES_DIR") == nil {
-            if let bundledGhosttyURL,
-               fileManager.fileExists(atPath: bundledGhosttyURL.path),
-               fileManager.fileExists(atPath: bundledGhosttyURL.appendingPathComponent("themes").path) {
-                resolvedResourcesDir = bundledGhosttyURL.path
-            } else if fileManager.fileExists(atPath: ghosttyAppResources) {
+        if let bundledGhosttyURL,
+           fileManager.fileExists(atPath: bundledGhosttyURL.path),
+           fileManager.fileExists(atPath: bundledGhosttyURL.appendingPathComponent("themes").path) {
+            resolvedResourcesDir = bundledGhosttyURL.path
+        } else if getenv("GHOSTTY_RESOURCES_DIR") == nil {
+            if fileManager.fileExists(atPath: ghosttyAppResources) {
                 resolvedResourcesDir = ghosttyAppResources
             } else if let bundledGhosttyURL, fileManager.fileExists(atPath: bundledGhosttyURL.path) {
                 resolvedResourcesDir = bundledGhosttyURL.path
             }
+        }
 
-            if let resolvedResourcesDir {
-                setenv("GHOSTTY_RESOURCES_DIR", resolvedResourcesDir, 1)
-            }
+        if let resolvedResourcesDir {
+            setenv("GHOSTTY_RESOURCES_DIR", resolvedResourcesDir, 1)
+        }
+
+        if let bundledTerminfoURL, fileManager.fileExists(atPath: bundledTerminfoURL.path) {
+            setenv("TERMINFO", bundledTerminfoURL.path, 1)
         }
 
         if getenv("TERM") == nil {
@@ -123,25 +129,29 @@ struct cmuxApp: App {
             let dataDir = resourcesParent.path
             let manDir = resourcesParent.appendingPathComponent("man").path
 
-            appendEnvPathIfMissing(
+            prependEnvPathIfMissing(
                 "XDG_DATA_DIRS",
                 path: dataDir,
                 defaultValue: "/usr/local/share:/usr/share"
             )
-            appendEnvPathIfMissing("MANPATH", path: manDir)
+            prependEnvPathIfMissing("MANPATH", path: manDir)
         }
     }
 
-    private static func appendEnvPathIfMissing(_ key: String, path: String, defaultValue: String? = nil) {
+    private static func prependEnvPathIfMissing(_ key: String, path: String, defaultValue: String? = nil) {
         if path.isEmpty { return }
         var current = getenv(key).flatMap { String(cString: $0) } ?? ""
         if current.isEmpty, let defaultValue {
             current = defaultValue
         }
-        if current.split(separator: ":").contains(Substring(path)) {
+        let parts = current
+            .split(separator: ":")
+            .map(String.init)
+        if parts.first == path {
             return
         }
-        let updated = current.isEmpty ? path : "\(current):\(path)"
+        let filtered = parts.filter { $0 != path }
+        let updated = ([path] + filtered).joined(separator: ":")
         setenv(key, updated, 1)
     }
 
@@ -606,9 +616,14 @@ struct cmuxApp: App {
                     performSplitFromMenu(direction: .right)
                 }
 
+                splitCommandButton(title: String(localized: "menu.view.openPaneRight", defaultValue: "Open Pane Right"), shortcut: openPaneRightMenuShortcut) {
+                    performOpenPaneRightFromMenu()
+                }
+
                 splitCommandButton(title: String(localized: "menu.view.splitDown", defaultValue: "Split Down"), shortcut: splitDownMenuShortcut) {
                     performSplitFromMenu(direction: .down)
                 }
+                .disabled(!activeWorkspaceSupportsVerticalPaneSplit)
 
                 splitCommandButton(title: String(localized: "menu.view.splitBrowserRight", defaultValue: "Split Browser Right"), shortcut: splitBrowserRightMenuShortcut) {
                     performBrowserSplitFromMenu(direction: .right)
@@ -617,6 +632,7 @@ struct cmuxApp: App {
                 splitCommandButton(title: String(localized: "menu.view.splitBrowserDown", defaultValue: "Split Browser Down"), shortcut: splitBrowserDownMenuShortcut) {
                     performBrowserSplitFromMenu(direction: .down)
                 }
+                .disabled(!activeWorkspaceSupportsVerticalPaneSplit)
 
                 Divider()
 
@@ -689,6 +705,10 @@ struct cmuxApp: App {
 
     private var splitRightMenuShortcut: StoredShortcut {
         decodeShortcut(from: splitRightShortcutData, fallback: KeyboardShortcutSettings.Action.splitRight.defaultShortcut)
+    }
+
+    private var openPaneRightMenuShortcut: StoredShortcut {
+        decodeShortcut(from: openPaneRightShortcutData, fallback: KeyboardShortcutSettings.Action.openPaneRight.defaultShortcut)
     }
 
     private var toggleSidebarMenuShortcut: StoredShortcut {
@@ -799,6 +819,10 @@ struct cmuxApp: App {
         ) ?? tabManager
     }
 
+    private var activeWorkspaceSupportsVerticalPaneSplit: Bool {
+        activeTabManager.selectedWorkspace?.bonsplitController.layoutStyle != .paperCanvas
+    }
+
     private func decodeShortcut(from data: Data, fallback: StoredShortcut) -> StoredShortcut {
         guard !data.isEmpty,
               let shortcut = try? JSONDecoder().decode(StoredShortcut.self, from: data) else {
@@ -825,6 +849,13 @@ struct cmuxApp: App {
             return
         }
         tabManager.createSplit(direction: direction)
+    }
+
+    private func performOpenPaneRightFromMenu() {
+        if AppDelegate.shared?.performOpenPaneRightShortcut() == true {
+            return
+        }
+        _ = tabManager.openPaneRight()
     }
 
     private func performBrowserSplitFromMenu(direction: SplitDirection) {

@@ -164,6 +164,16 @@ final class SplitViewController {
         return paperCanvas != nil
     }
 
+    @discardableResult
+    func panPaperCanvasViewport(by delta: CGSize) -> Bool {
+        guard layoutStyle == .paperCanvas else { return false }
+        if paperCanvas == nil {
+            enablePaperCanvasLayout()
+        }
+        paperCanvas?.panViewport(by: delta)
+        return paperCanvas != nil
+    }
+
     var allPaneIds: [PaneID] {
         switch layoutStyle {
         case .splitTree:
@@ -208,9 +218,8 @@ final class SplitViewController {
         dlog("focus.bonsplit pane=\(paneId.id.uuidString.prefix(5))")
 #endif
         focusedPaneId = paneId
-        if layoutStyle == .paperCanvas,
-           let frame = paperCanvas?.pane(paneId)?.frame {
-            paperCanvas?.reveal(frame)
+        if layoutStyle == .paperCanvas {
+            paperCanvas?.revealPane(paneId)
         }
     }
 
@@ -279,6 +288,37 @@ final class SplitViewController {
         }
     }
 
+    @discardableResult
+    func openPaperCanvasPaneRight(_ paneId: PaneID, newTab: TabItem? = nil) -> PaneID? {
+        guard layoutStyle == .paperCanvas else { return nil }
+        clearPaneZoom()
+        if paperCanvas == nil {
+            enablePaperCanvasLayout()
+        }
+        guard let paperCanvas,
+              paperCanvas.pane(paneId) != nil else {
+            return nil
+        }
+
+        let newPane = PaneState(tabs: newTab.map { [$0] } ?? [])
+        guard let newFrame = paperCanvas.insertPaneRight(
+            newPane,
+            after: paneId,
+            requestedWidth: floor(paperCanvas.viewportSize.width * (2.0 / 3.0)),
+            minimumSize: CGSize(width: minimumPaneWidth, height: minimumPaneHeight)
+        ) else {
+            return nil
+        }
+        focusedPaneId = newPane.id
+        paperCanvas.setViewportOrigin(
+            CGPoint(
+                x: newFrame.maxX - paperCanvas.viewportSize.width,
+                y: paperCanvas.viewportOrigin.y
+            )
+        )
+        return newPane.id
+    }
+
     private func splitPaperPane(
         _ paneId: PaneID,
         orientation: SplitOrientation,
@@ -287,20 +327,35 @@ final class SplitViewController {
     ) {
         clearPaneZoom()
         guard let paperCanvas,
+              paperCanvas.supportsTopLevelSplit(orientation),
               let target = paperCanvas.pane(paneId) else {
             return
         }
 
         let newPane = PaneState(tabs: newTab.map { [$0] } ?? [])
-        let placement = paperCanvas.resolvedSplitPlacement(
-            for: target.frame,
-            orientation: orientation,
-            insertFirst: insertFirst,
-            minimumSize: CGSize(width: minimumPaneWidth, height: minimumPaneHeight)
-        )
-        target.frame = placement.existingFrame
+        let placement: PaperCanvasState.SplitPlacement
+        switch orientation {
+        case .horizontal:
+            guard !insertFirst,
+                  let stripPlacement = paperCanvas.splitPaneRight(
+                      paneId,
+                      newPane: newPane,
+                      minimumSize: CGSize(width: minimumPaneWidth, height: minimumPaneHeight)
+                  ) else {
+                return
+            }
+            placement = stripPlacement
+        case .vertical:
+            placement = paperCanvas.resolvedSplitPlacement(
+                for: target.frame,
+                orientation: orientation,
+                insertFirst: insertFirst,
+                minimumSize: CGSize(width: minimumPaneWidth, height: minimumPaneHeight)
+            )
+            target.frame = placement.existingFrame
+            _ = paperCanvas.addPane(newPane, frame: placement.newFrame)
+        }
 
-        _ = paperCanvas.addPane(newPane, frame: placement.newFrame)
         focusedPaneId = newPane.id
         switch placement.mode {
         case .localReflow:
@@ -429,21 +484,21 @@ final class SplitViewController {
             }
 
             let closingFrame = closingPane.frame
-            _ = paperCanvas.removePane(paneId)
+            let closeResult = paperCanvas.removePane(paneId, preferredFocus: focusedPaneId)
 
             if let zoomedPaneId, zoomedPaneId == paneId {
                 self.zoomedPaneId = nil
             }
 
-            if let nextFocus = findBestNeighbor(
-                from: closingFrame,
-                currentPaneId: paneId,
-                directionCandidates: paneBounds()
-            ) ?? paperCanvas.allPaneIds.first {
+            if let nextFocus = closeResult?.nextFocus
+                ?? findBestNeighbor(
+                    from: closingFrame,
+                    currentPaneId: paneId,
+                    directionCandidates: paneBounds()
+                )
+                ?? paperCanvas.allPaneIds.first {
                 focusedPaneId = nextFocus
-                if let focusFrame = paperCanvas.pane(nextFocus)?.frame {
-                    paperCanvas.reveal(focusFrame)
-                }
+                paperCanvas.revealPane(nextFocus)
             }
         }
     }
@@ -624,6 +679,22 @@ final class SplitViewController {
             amount: amount,
             minimumSize: minimumSize
         )
+    }
+
+    @discardableResult
+    func equalizePaperPanes() -> Bool {
+        guard layoutStyle == .paperCanvas else { return false }
+        if paperCanvas == nil {
+            enablePaperCanvasLayout()
+        }
+        guard let paperCanvas else { return false }
+        let equalized = paperCanvas.equalizePaneWidths(minimumWidth: minimumPaneWidth)
+        if equalized,
+           let focusedPaneId,
+           let frame = paperCanvas.pane(focusedPaneId)?.frame {
+            paperCanvas.reveal(frame, margin: 0)
+        }
+        return equalized
     }
 
     func createNewTab() {

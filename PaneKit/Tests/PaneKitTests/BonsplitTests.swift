@@ -408,7 +408,9 @@ final class BonsplitTests: XCTestCase {
 
     @MainActor
     func testSplitPaneWithInsertSidePreservesCustomTitleFlag() {
-        let controller = BonsplitController()
+        let controller = BonsplitController(
+            configuration: BonsplitConfiguration(layoutStyle: .splitTree)
+        )
         _ = controller.createTab(title: "Base")
         let sourcePaneId = controller.focusedPaneId!
         let customTab = PaneKit.Tab(title: "Custom", hasCustomTitle: true)
@@ -451,7 +453,9 @@ final class BonsplitTests: XCTestCase {
 
     @MainActor
     func testSplitClearsExistingPaneZoom() {
-        let controller = BonsplitController()
+        let controller = BonsplitController(
+            configuration: BonsplitConfiguration(layoutStyle: .splitTree)
+        )
         guard let originalPane = controller.focusedPaneId else {
             return XCTFail("Expected focused pane")
         }
@@ -495,6 +499,75 @@ final class BonsplitTests: XCTestCase {
         XCTAssertEqual(spy.action, .markAsRead)
         XCTAssertEqual(spy.tabId, tabId)
         XCTAssertEqual(spy.paneId, pane)
+    }
+
+    @MainActor
+    func testPaperCanvasSplitRightKeepsLocalSplitBehaviorInSingleRow() {
+        let controller = BonsplitController(
+            configuration: BonsplitConfiguration(layoutStyle: .paperCanvas)
+        )
+        controller.setContainerFrame(CGRect(x: 0, y: 0, width: 1200, height: 800))
+
+        guard let originalPane = controller.focusedPaneId,
+              let originalFrameBefore = controller.paperCanvasLayout()?.panes.first(where: { $0.paneId == originalPane })?.frame else {
+            return XCTFail("Expected initial paper pane")
+        }
+
+        guard let newPane = controller.splitPane(originalPane, orientation: .horizontal),
+              let originalFrameAfter = controller.paperCanvasLayout()?.panes.first(where: { $0.paneId == originalPane })?.frame,
+              let newFrame = controller.paperCanvasLayout()?.panes.first(where: { $0.paneId == newPane })?.frame else {
+            return XCTFail("Expected split paper panes")
+        }
+
+        XCTAssertEqual(Set([originalFrameAfter.minY, newFrame.minY]), [0])
+        XCTAssertLessThan(originalFrameAfter.width, originalFrameBefore.width)
+        XCTAssertEqual(originalFrameAfter.maxX + 16, newFrame.minX, accuracy: 1.0)
+    }
+
+    @MainActor
+    func testPaperCanvasSinglePaneExpandsToFirstRealViewportSize() {
+        let controller = BonsplitController(
+            configuration: BonsplitConfiguration(layoutStyle: .paperCanvas)
+        )
+
+        controller.setContainerFrame(CGRect(x: 0, y: 0, width: 1400, height: 900))
+
+        guard let layout = controller.paperCanvasLayout(),
+              let onlyFrame = layout.panes.first?.frame else {
+            return XCTFail("Expected paper canvas layout after viewport sizing")
+        }
+
+        XCTAssertEqual(layout.panes.count, 1)
+        XCTAssertEqual(onlyFrame.origin.x, 0, accuracy: 0.001)
+        XCTAssertEqual(onlyFrame.origin.y, 0, accuracy: 0.001)
+        XCTAssertEqual(onlyFrame.width, 1400, accuracy: 1.0)
+        XCTAssertEqual(onlyFrame.height, 900, accuracy: 1.0)
+    }
+
+    @MainActor
+    func testPaperCanvasSplitDownIsRejectedInHorizontalPaneStripMode() {
+        let controller = BonsplitController(
+            configuration: BonsplitConfiguration(layoutStyle: .paperCanvas)
+        )
+        controller.setContainerFrame(CGRect(x: 0, y: 0, width: 1200, height: 800))
+
+        guard let originalPane = controller.focusedPaneId else {
+            return XCTFail("Expected focused paper pane")
+        }
+        guard let originalFrame = controller.paperCanvasLayout()?.panes.first(where: { $0.paneId == originalPane })?.frame else {
+            return XCTFail("Expected initial paper layout")
+        }
+
+        XCTAssertNil(controller.splitPane(originalPane, orientation: .vertical))
+        XCTAssertEqual(controller.allPaneIds.count, 1)
+
+        guard let layout = controller.paperCanvasLayout(),
+              let onlyFrame = layout.panes.first?.frame else {
+            return XCTFail("Expected unchanged paper layout")
+        }
+
+        XCTAssertEqual(layout.panes.count, 1)
+        XCTAssertEqual(onlyFrame, originalFrame)
     }
 
     @MainActor
@@ -556,6 +629,28 @@ final class BonsplitTests: XCTestCase {
 
         XCTAssertEqual(controller.focusedPaneId, farRightPane)
         XCTAssertGreaterThan(controller.internalController.paperViewportOrigin.x, beforeOrigin.x)
+    }
+
+    @MainActor
+    func testPaperCanvasFocusRevealUsesExactStripVisibilityWithoutExtraMargin() {
+        let controller = BonsplitController(
+            configuration: BonsplitConfiguration(layoutStyle: .paperCanvas)
+        )
+        controller.setContainerFrame(CGRect(x: 0, y: 0, width: 1200, height: 800))
+
+        guard let firstPane = controller.focusedPaneId,
+              let secondPane = controller.openPaperCanvasPaneRight(firstPane),
+              let thirdPane = controller.openPaperCanvasPaneRight(secondPane) else {
+            return XCTFail("Expected paper pane strip")
+        }
+
+        controller.focusPane(thirdPane)
+        XCTAssertTrue(controller.panPaperCanvasViewport(by: CGSize(width: -4000, height: 0)))
+        XCTAssertEqual(controller.internalController.paperViewportOrigin.x, 0, accuracy: 0.001)
+
+        controller.focusPane(secondPane)
+
+        XCTAssertEqual(controller.internalController.paperViewportOrigin.x, 816, accuracy: 1.0)
     }
 
     @MainActor
@@ -656,10 +751,187 @@ final class BonsplitTests: XCTestCase {
         }
 
         XCTAssertEqual(rootFrame.origin.x, 0, accuracy: 0.001)
-        XCTAssertEqual(rightFrame.origin.x, 980, accuracy: 0.001)
+        XCTAssertEqual(rightFrame.origin.x, 916, accuracy: 0.001)
+        XCTAssertEqual(rightFrame.origin.y, 120, accuracy: 0.001)
         XCTAssertEqual(restored.viewportOrigin.x, 820, accuracy: 0.001)
         XCTAssertEqual(restored.viewportOrigin.y, 90, accuracy: 0.001)
         XCTAssertEqual(restored.focusedPaneId, rightPane)
+    }
+
+    @MainActor
+    func testPaperCanvasViewportPanUpdatesAndClampsToCanvasBounds() {
+        let controller = BonsplitController(
+            configuration: BonsplitConfiguration(layoutStyle: .paperCanvas)
+        )
+        controller.setContainerFrame(CGRect(x: 0, y: 0, width: 900, height: 600))
+
+        guard let rootPane = controller.focusedPaneId,
+              let rightPane = controller.splitPane(rootPane, orientation: .horizontal) else {
+            return XCTFail("Expected initial paper layout")
+        }
+
+        let layout = PaperCanvasLayoutSnapshot(
+            panes: [
+                PaperCanvasPaneSnapshot(
+                    paneId: rootPane,
+                    frame: CGRect(x: 0, y: 0, width: 900, height: 600)
+                ),
+                PaperCanvasPaneSnapshot(
+                    paneId: rightPane,
+                    frame: CGRect(x: 980, y: 120, width: 900, height: 600)
+                )
+            ],
+            viewportOrigin: .zero,
+            focusedPaneId: rootPane
+        )
+
+        XCTAssertTrue(controller.applyPaperCanvasLayout(layout))
+        XCTAssertTrue(controller.panPaperCanvasViewport(by: CGSize(width: 820, height: 200)))
+
+        guard let afterFirstPan = controller.paperCanvasLayout() else {
+            return XCTFail("Expected paper layout after first pan")
+        }
+        XCTAssertEqual(afterFirstPan.viewportOrigin.x, 820, accuracy: 0.001)
+        XCTAssertEqual(afterFirstPan.viewportOrigin.y, 120, accuracy: 0.001)
+
+        XCTAssertTrue(controller.panPaperCanvasViewport(by: CGSize(width: 500, height: 500)))
+        guard let afterOverflowPan = controller.paperCanvasLayout() else {
+            return XCTFail("Expected paper layout after overflow pan")
+        }
+        XCTAssertEqual(afterOverflowPan.viewportOrigin.x, 916, accuracy: 0.001)
+        XCTAssertEqual(afterOverflowPan.viewportOrigin.y, 120, accuracy: 0.001)
+
+        XCTAssertTrue(controller.panPaperCanvasViewport(by: CGSize(width: -2000, height: -2000)))
+        guard let afterReversePan = controller.paperCanvasLayout() else {
+            return XCTFail("Expected paper layout after reverse pan")
+        }
+        XCTAssertEqual(afterReversePan.viewportOrigin.x, 0, accuracy: 0.001)
+        XCTAssertEqual(afterReversePan.viewportOrigin.y, 0, accuracy: 0.001)
+    }
+
+    @MainActor
+    func testPaperCanvasOpenPaneRightInsertsViewportSizedSiblingWithoutShrinkingCurrentPane() {
+        let controller = BonsplitController(
+            configuration: BonsplitConfiguration(layoutStyle: .paperCanvas)
+        )
+        controller.setContainerFrame(CGRect(x: 0, y: 0, width: 1200, height: 800))
+
+        guard let originalPane = controller.focusedPaneId,
+              let originalFrameBefore = controller.paperCanvasLayout()?.panes.first(where: { $0.paneId == originalPane })?.frame else {
+            return XCTFail("Expected initial paper pane")
+        }
+
+        guard let newPane = controller.openPaperCanvasPaneRight(originalPane),
+              let layout = controller.paperCanvasLayout(),
+              let originalFrameAfter = layout.panes.first(where: { $0.paneId == originalPane })?.frame,
+              let newFrame = layout.panes.first(where: { $0.paneId == newPane })?.frame else {
+            return XCTFail("Expected inserted paper pane")
+        }
+
+        XCTAssertEqual(layout.panes.count, 2)
+        XCTAssertEqual(originalFrameAfter.width, originalFrameBefore.width, accuracy: 0.001)
+        XCTAssertEqual(newFrame.minX, originalFrameBefore.maxX + 16, accuracy: 0.001)
+        XCTAssertEqual(newFrame.width, 800, accuracy: 1.0)
+        XCTAssertEqual(layout.viewportOrigin.x, newFrame.maxX - 1200, accuracy: 1.0)
+        XCTAssertGreaterThan(originalFrameAfter.maxX - layout.viewportOrigin.x, 0)
+    }
+
+    @MainActor
+    func testPaperCanvasLayoutSnapshotIsDerivedFromStripState() {
+        let controller = BonsplitController(
+            configuration: BonsplitConfiguration(layoutStyle: .paperCanvas)
+        )
+        controller.setContainerFrame(CGRect(x: 0, y: 0, width: 1400, height: 900))
+
+        guard let rootPane = controller.focusedPaneId,
+              let insertedPane = controller.openPaperCanvasPaneRight(rootPane),
+              let layout = controller.paperCanvasLayout(),
+              let rootFrame = layout.panes.first(where: { $0.paneId == rootPane })?.frame,
+              let insertedFrame = layout.panes.first(where: { $0.paneId == insertedPane })?.frame else {
+            return XCTFail("Expected paper canvas layout after opening pane")
+        }
+
+        XCTAssertEqual(layout.panes.map(\.frame.minY), [0, 0])
+        XCTAssertEqual(rootFrame.width, 1400, accuracy: 1.0)
+        XCTAssertEqual(insertedFrame.width, 933, accuracy: 1.0)
+    }
+
+    @MainActor
+    func testApplyPaperCanvasLayoutRestoresOrderedStripWidthsFromFrames() {
+        let controller = BonsplitController(
+            configuration: BonsplitConfiguration(layoutStyle: .paperCanvas)
+        )
+        controller.setContainerFrame(CGRect(x: 0, y: 0, width: 1200, height: 800))
+
+        guard let firstPane = controller.focusedPaneId,
+              let secondPane = controller.openPaperCanvasPaneRight(firstPane) else {
+            return XCTFail("Expected initial paper panes")
+        }
+
+        let snapshot = PaperCanvasLayoutSnapshot(
+            panes: [
+                .init(paneId: firstPane, frame: CGRect(x: 0, y: 0, width: 600, height: 800)),
+                .init(paneId: secondPane, frame: CGRect(x: 616, y: 0, width: 800, height: 800))
+            ],
+            viewportOrigin: CGPoint(x: 216, y: 0),
+            focusedPaneId: secondPane
+        )
+
+        XCTAssertTrue(controller.applyPaperCanvasLayout(snapshot))
+
+        guard let restored = controller.paperCanvasLayout() else {
+            return XCTFail("Expected restored paper layout")
+        }
+
+        XCTAssertEqual(restored.panes.count, 2)
+        XCTAssertEqual(restored.panes[0].frame.minX, 0, accuracy: 1.0)
+        XCTAssertEqual(restored.panes[1].frame.minX, 616, accuracy: 1.0)
+        XCTAssertEqual(restored.viewportOrigin.x, 216, accuracy: 1.0)
+        XCTAssertEqual(restored.focusedPaneId, secondPane)
+    }
+
+    @MainActor
+    func testPaperCanvasCloseUsesStripNeighborFocusRules() {
+        let controller = BonsplitController(
+            configuration: BonsplitConfiguration(layoutStyle: .paperCanvas)
+        )
+        controller.setContainerFrame(CGRect(x: 0, y: 0, width: 1200, height: 800))
+
+        guard let firstPane = controller.focusedPaneId,
+              let secondPane = controller.openPaperCanvasPaneRight(firstPane),
+              let thirdPane = controller.openPaperCanvasPaneRight(secondPane) else {
+            return XCTFail("Expected paper pane strip")
+        }
+
+        controller.focusPane(secondPane)
+        XCTAssertTrue(controller.closePane(secondPane))
+
+        XCTAssertEqual(controller.focusedPaneId, firstPane)
+        XCTAssertEqual(controller.allPaneIds, [firstPane, thirdPane])
+    }
+
+    @MainActor
+    func testPaperCanvasEqualizeUsesStripOrderRatherThanLegacySplitTree() {
+        let controller = BonsplitController(
+            configuration: BonsplitConfiguration(layoutStyle: .paperCanvas)
+        )
+        controller.setContainerFrame(CGRect(x: 0, y: 0, width: 1200, height: 800))
+
+        guard let firstPane = controller.focusedPaneId,
+              let secondPane = controller.openPaperCanvasPaneRight(firstPane) else {
+            return XCTFail("Expected paper panes")
+        }
+
+        XCTAssertTrue(controller.resizePaperPane(firstPane, direction: .right, amount: 160))
+        XCTAssertTrue(controller.equalizePaperPanes())
+
+        guard let layout = controller.paperCanvasLayout(),
+              let firstFrame = layout.panes.first(where: { $0.paneId == firstPane })?.frame,
+              let secondFrame = layout.panes.first(where: { $0.paneId == secondPane })?.frame else {
+            return XCTFail("Expected equalized paper layout")
+        }
+
+        XCTAssertEqual(firstFrame.width, secondFrame.width, accuracy: 1.0)
     }
 
     func testIconSaturationKeepsRasterFaviconInColorWhenInactive() {

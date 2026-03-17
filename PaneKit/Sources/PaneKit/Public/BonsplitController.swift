@@ -368,6 +368,9 @@ public final class BonsplitController {
         withTab tab: Tab? = nil
     ) -> PaneID? {
         guard configuration.allowSplits else { return nil }
+        if configuration.layoutStyle == .paperCanvas, orientation == .vertical {
+            return nil
+        }
 
         let targetPaneId = paneId ?? focusedPaneId
         guard let targetPaneId else { return nil }
@@ -432,6 +435,9 @@ public final class BonsplitController {
         insertFirst: Bool
     ) -> PaneID? {
         guard configuration.allowSplits else { return nil }
+        if configuration.layoutStyle == .paperCanvas, orientation == .vertical {
+            return nil
+        }
 
         let targetPaneId = paneId ?? focusedPaneId
         guard let targetPaneId else { return nil }
@@ -492,6 +498,9 @@ public final class BonsplitController {
         insertFirst: Bool
     ) -> PaneID? {
         guard configuration.allowSplits else { return nil }
+        if configuration.layoutStyle == .paperCanvas, orientation == .vertical {
+            return nil
+        }
 
         // Find the existing tab and its source pane.
         guard let (sourcePane, tabIndex) = findTabInternal(tabId) else { return nil }
@@ -573,15 +582,25 @@ public final class BonsplitController {
 
     /// Focus a specific pane
     public func focusPane(_ paneId: PaneID) {
+        let previousViewportOrigin = internalController.paperViewportOrigin
         internalController.focusPane(PaneID(id: paneId.id))
         delegate?.splitTabBar(self, didFocusPane: paneId)
+        if configuration.layoutStyle == .paperCanvas,
+           internalController.paperViewportOrigin != previousViewportOrigin {
+            notifyGeometryChange()
+        }
     }
 
     /// Navigate focus in a direction
     public func navigateFocus(direction: NavigationDirection) {
+        let previousViewportOrigin = internalController.paperViewportOrigin
         internalController.navigateFocus(direction: direction)
         if let focusedPaneId {
             delegate?.splitTabBar(self, didFocusPane: focusedPaneId)
+        }
+        if configuration.layoutStyle == .paperCanvas,
+           internalController.paperViewportOrigin != previousViewportOrigin {
+            notifyGeometryChange()
         }
     }
 
@@ -682,6 +701,61 @@ public final class BonsplitController {
     }
 
     @discardableResult
+    public func panPaperCanvasViewport(
+        by delta: CGSize,
+        notify: Bool = true
+    ) -> Bool {
+        let updated = internalController.panPaperCanvasViewport(by: delta)
+        if updated, notify {
+            notifyGeometryChange()
+        }
+        return updated
+    }
+
+    /// Insert a new paper-canvas pane to the right without shrinking the current pane.
+    @discardableResult
+    public func openPaperCanvasPaneRight(
+        _ paneId: PaneID? = nil,
+        withTab tab: Tab? = nil,
+        notify: Bool = true
+    ) -> PaneID? {
+        guard configuration.layoutStyle == .paperCanvas else { return nil }
+
+        let targetPaneId = paneId ?? focusedPaneId
+        guard let targetPaneId else { return nil }
+
+        let internalTab: TabItem?
+        if let tab {
+            internalTab = TabItem(
+                id: tab.id.id,
+                title: tab.title,
+                hasCustomTitle: tab.hasCustomTitle,
+                icon: tab.icon,
+                iconImageData: tab.iconImageData,
+                kind: tab.kind,
+                isDirty: tab.isDirty,
+                showsNotificationBadge: tab.showsNotificationBadge,
+                isLoading: tab.isLoading,
+                isPinned: tab.isPinned
+            )
+        } else {
+            internalTab = nil
+        }
+
+        guard let newPaneId = internalController.openPaperCanvasPaneRight(
+            PaneID(id: targetPaneId.id),
+            newTab: internalTab
+        ) else {
+            return nil
+        }
+
+        if notify {
+            notifyGeometryChange()
+        }
+        return newPaneId
+    }
+
+    @discardableResult
     public func resizePaperPane(
         _ paneId: PaneID,
         direction: NavigationDirection,
@@ -696,6 +770,15 @@ public final class BonsplitController {
             notifyGeometryChange()
         }
         return true
+    }
+
+    @discardableResult
+    public func equalizePaperPanes(notify: Bool = true) -> Bool {
+        let equalized = internalController.equalizePaperPanes()
+        if equalized, notify {
+            notifyGeometryChange()
+        }
+        return equalized
     }
 
     // MARK: - Geometry Query API

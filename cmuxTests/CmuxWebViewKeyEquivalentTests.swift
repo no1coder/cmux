@@ -1643,6 +1643,18 @@ final class WorkspaceRenameShortcutDefaultsTests: XCTestCase {
         XCTAssertFalse(shortcut.control)
     }
 
+    func testOpenPaneRightShortcutDefaultsAndMetadata() {
+        XCTAssertEqual(KeyboardShortcutSettings.Action.openPaneRight.label, "Open Pane Right")
+        XCTAssertEqual(KeyboardShortcutSettings.Action.openPaneRight.defaultsKey, "shortcut.openPaneRight")
+
+        let shortcut = KeyboardShortcutSettings.Action.openPaneRight.defaultShortcut
+        XCTAssertEqual(shortcut.key, "n")
+        XCTAssertTrue(shortcut.command)
+        XCTAssertFalse(shortcut.shift)
+        XCTAssertTrue(shortcut.option)
+        XCTAssertFalse(shortcut.control)
+    }
+
     func testMenuItemKeyEquivalentHandlesArrowAndTabKeys() {
         XCTAssertNotNil(StoredShortcut(key: "←", command: true, shift: false, option: false, control: false).menuItemKeyEquivalent)
         XCTAssertNotNil(StoredShortcut(key: "→", command: true, shift: false, option: false, control: false).menuItemKeyEquivalent)
@@ -5595,13 +5607,12 @@ final class TabManagerSurfaceCreationTests: XCTestCase {
         )
     }
 
-    func testOpenBrowserInWorkspaceSplitRightReusesTopRightPaneWhenAlreadySplit() {
+    func testOpenBrowserInWorkspaceSplitRightReusesRightmostPaneWhenAlreadySplit() {
         let manager = TabManager()
         guard let workspace = manager.selectedWorkspace,
               let leftPanelId = workspace.focusedPanelId,
-              let topRightPanel = workspace.newTerminalSplit(from: leftPanelId, orientation: .horizontal),
-              workspace.newTerminalSplit(from: topRightPanel.id, orientation: .vertical) != nil,
-              let topRightPaneId = workspace.paneId(forPanelId: topRightPanel.id),
+              let rightPanel = workspace.newTerminalSplit(from: leftPanelId, orientation: .horizontal),
+              let rightPaneId = workspace.paneId(forPanelId: rightPanel.id),
               let url = URL(string: "https://example.com/pull/456") else {
             XCTFail("Expected split setup to succeed")
             return
@@ -5626,19 +5637,19 @@ final class TabManagerSurfaceCreationTests: XCTestCase {
         )
         XCTAssertEqual(
             workspace.paneId(forPanelId: browserPanelId),
-            topRightPaneId,
-            "Expected browser to open in the top-right pane when multiple splits already exist"
+            rightPaneId,
+            "Expected browser to open in the rightmost pane when multiple panes already exist"
         )
 
-        let targetPaneTabs = workspace.bonsplitController.tabs(inPane: topRightPaneId)
+        let targetPaneTabs = workspace.bonsplitController.tabs(inPane: rightPaneId)
         guard let lastSurfaceId = targetPaneTabs.last?.id else {
-            XCTFail("Expected top-right pane to contain tabs")
+            XCTFail("Expected right pane to contain tabs")
             return
         }
         XCTAssertEqual(
             workspace.panelIdFromSurfaceId(lastSurfaceId),
             browserPanelId,
-            "Expected browser surface to be appended at end in the reused top-right pane"
+            "Expected browser surface to be appended at end in the reused right pane"
         )
     }
 }
@@ -5649,43 +5660,38 @@ final class TabManagerEqualizeSplitsTests: XCTestCase {
         let manager = TabManager()
         guard let workspace = manager.selectedWorkspace,
               let leftPanelId = workspace.focusedPanelId,
-              let rightPanel = workspace.newTerminalSplit(from: leftPanelId, orientation: .horizontal),
-              workspace.newTerminalSplit(from: rightPanel.id, orientation: .vertical) != nil else {
-            XCTFail("Expected nested split setup to succeed")
+              workspace.newTerminalSplit(from: leftPanelId, orientation: .horizontal) != nil else {
+            XCTFail("Expected horizontal split setup to succeed")
             return
         }
 
-        let initialSplits = splitNodes(in: workspace.bonsplitController.treeSnapshot())
-        XCTAssertGreaterThanOrEqual(initialSplits.count, 2, "Expected at least two split nodes in nested layout")
-
-        for (index, split) in initialSplits.enumerated() {
-            guard let splitId = UUID(uuidString: split.id) else {
-                XCTFail("Expected split ID to be a UUID")
-                return
-            }
-            let targetPosition: CGFloat = index.isMultiple(of: 2) ? 0.2 : 0.8
-            XCTAssertTrue(
-                workspace.bonsplitController.setDividerPosition(targetPosition, forSplit: splitId),
-                "Expected to seed divider position for split \(splitId)"
-            )
+        guard let layoutBeforeResize = workspace.bonsplitController.paperCanvasLayout(),
+              let leftPane = layoutBeforeResize.panes.min(by: { $0.frame.minX < $1.frame.minX }),
+              let rightPane = layoutBeforeResize.panes.max(by: { $0.frame.minX < $1.frame.minX }) else {
+            XCTFail("Expected paper canvas panes before equalize")
+            return
         }
+        XCTAssertTrue(
+            workspace.bonsplitController.resizePaperPane(leftPane.paneId, direction: .right, amount: 120, notify: false)
+        )
+
+        guard let layoutAfterResize = workspace.bonsplitController.paperCanvasLayout(),
+              let resizedLeftFrame = layoutAfterResize.panes.first(where: { $0.paneId == leftPane.paneId })?.frame,
+              let resizedRightFrame = layoutAfterResize.panes.first(where: { $0.paneId == rightPane.paneId })?.frame else {
+            XCTFail("Expected resized paper canvas panes")
+            return
+        }
+        XCTAssertNotEqual(resizedLeftFrame.width, resizedRightFrame.width, accuracy: 1.0)
 
         XCTAssertTrue(manager.equalizeSplits(tabId: workspace.id), "Expected equalize splits command to succeed")
 
-        let equalizedSplits = splitNodes(in: workspace.bonsplitController.treeSnapshot())
-        XCTAssertEqual(equalizedSplits.count, initialSplits.count)
-        for split in equalizedSplits {
-            XCTAssertEqual(split.dividerPosition, 0.5, accuracy: 0.000_1)
+        guard let equalizedLayout = workspace.bonsplitController.paperCanvasLayout(),
+              let equalizedLeftFrame = equalizedLayout.panes.first(where: { $0.paneId == leftPane.paneId })?.frame,
+              let equalizedRightFrame = equalizedLayout.panes.first(where: { $0.paneId == rightPane.paneId })?.frame else {
+            XCTFail("Expected equalized paper canvas panes")
+            return
         }
-    }
-
-    private func splitNodes(in node: ExternalTreeNode) -> [ExternalSplitNode] {
-        switch node {
-        case .pane:
-            return []
-        case .split(let split):
-            return [split] + splitNodes(in: split.first) + splitNodes(in: split.second)
-        }
+        XCTAssertEqual(equalizedLeftFrame.width, equalizedRightFrame.width, accuracy: 1.0)
     }
 }
 
@@ -13675,6 +13681,18 @@ final class FileDropOverlayViewTests: XCTestCase {
         window.contentView?.layoutSubtreeIfNeeded()
         RunLoop.current.run(until: Date().addingTimeInterval(0.05))
         window.contentView?.layoutSubtreeIfNeeded()
+    }
+
+    func testFileDropOverlayInstallationIsDisabledDuringAutomatedTests() {
+        XCTAssertFalse(
+            shouldInstallFileDropOverlay(environment: ["CMUX_UI_TEST_MODE": "1"])
+        )
+        XCTAssertFalse(
+            shouldInstallFileDropOverlay(environment: ["XCTestConfigurationFilePath": "/tmp/test.xctest"])
+        )
+        XCTAssertTrue(
+            shouldInstallFileDropOverlay(environment: [:])
+        )
     }
 
     func testOverlayResolvesPortalHostedBrowserWebViewForFileDrops() {

@@ -7,6 +7,13 @@ import PaneKit
 private var cmuxWindowTerminalPortalKey: UInt8 = 0
 private var cmuxWindowTerminalPortalCloseObserverKey: UInt8 = 0
 
+private func shouldDeferTerminalPortalBindDuringAutomatedTests(
+    environment: [String: String] = ProcessInfo.processInfo.environment
+) -> Bool {
+    SessionRestorePolicy.isRunningUnderAutomatedTests(environment: environment)
+        && environment["CMUX_UI_TEST_MODE"] != "1"
+}
+
 #if DEBUG
 private func portalDebugToken(_ view: NSView?) -> String {
     guard let view else { return "nil" }
@@ -22,6 +29,14 @@ private func portalDebugFrameInWindow(_ view: NSView?) -> String {
     guard let view else { return "nil" }
     guard view.window != nil else { return "no-window" }
     return portalDebugFrame(view.convert(view.bounds, to: nil))
+}
+
+struct DebugTerminalPortalMotionSample {
+    let anchorFrameInWindow: CGRect
+    let hostedFrameInWindow: CGRect
+    let anchorHidden: Bool
+    let hostedHidden: Bool
+    let surfaceSample: GhosttySurfaceScrollView.DebugFrameSample?
 }
 #endif
 
@@ -568,8 +583,9 @@ private final class SplitDividerOverlayView: NSView {
 @MainActor
 final class WindowTerminalPortal: NSObject {
     private static let tinyHideThreshold: CGFloat = 1
-    private static let minimumRevealWidth: CGFloat = 24
+    private static let minimumRevealWidth: CGFloat = 48
     private static let minimumRevealHeight: CGFloat = 18
+    private static let anchorCollapsePreserveRetryBudget = 8
     private static let transientRecoveryRetryBudget: Int = 12
 #if CMUX_ISSUE_483_PORTAL_RECOVERY
     private static let transientRecoveryEnabled = true
@@ -596,6 +612,7 @@ final class WindowTerminalPortal: NSObject {
         var visibleInUI: Bool
         var zPriority: Int
         var transientRecoveryRetriesRemaining: Int
+        var preserveVisibleRetryCount: Int
     }
 
     private var entriesByHostedId: [ObjectIdentifier: Entry] = [:]
@@ -824,10 +841,10 @@ final class WindowTerminalPortal: NSObject {
     private func installationTarget(for window: NSWindow) -> (container: NSView, reference: NSView)? {
         guard let contentView = window.contentView else { return nil }
 
-        // If NSGlassEffectView wraps the original content view, install inside the glass view
-        // so terminals are above the glass background but below SwiftUI content.
-        if contentView.className == "NSGlassEffectView",
-           let foreground = contentView.subviews.first(where: { $0 !== hostView }) {
+        // Install inside the content view whenever it has a foreground child. Sequoia logs
+        // warnings when custom portal hosts are inserted directly under NSThemeFrame during
+        // initial window attachment, and binding there can race terminal surface creation.
+        if let foreground = contentView.subviews.first(where: { $0 !== hostView }) {
             return (contentView, foreground)
         }
 
@@ -883,8 +900,7 @@ final class WindowTerminalPortal: NSObject {
         container.subviews.last(where: { $0 is WindowBrowserHostView }) as? WindowBrowserHostView
     }
 
-#if DEBUG
-    private func nearestBonsplitContainer(from anchorView: NSView) -> NSView? {
+    private func nearestPortalStabilityView(from anchorView: NSView) -> NSView? {
         var current: NSView? = anchorView
         while let view = current {
             let className = NSStringFromClass(type(of: view))
@@ -894,6 +910,11 @@ final class WindowTerminalPortal: NSObject {
             current = view.superview
         }
         return installedReferenceView
+    }
+
+#if DEBUG
+    private func nearestBonsplitContainer(from anchorView: NSView) -> NSView? {
+        nearestPortalStabilityView(from: anchorView)
     }
 
     private func logBonsplitContainerFrameIfNeeded(anchorView: NSView, hostedView: GhosttySurfaceScrollView) {
@@ -912,15 +933,78 @@ final class WindowTerminalPortal: NSObject {
     }
 #endif
 
+    private func presentationFrameInWindow(for view: NSView) -> NSRect {
+        let fallback = view.convert(view.bounds, to: nil)
+        guard let window = view.window else { return fallback }
+
+        func rootLayerTarget() -> (view: NSView, layer: CALayer)? {
+            if let contentView = window.contentView,
+               let contentLayer = contentView.layer {
+                return (contentView, contentLayer.presentation() ?? contentLayer)
+            }
+
+            if let themeFrame = window.contentView?.superview,
+               let themeLayer = themeFrame.layer {
+                return (themeFrame, themeLayer.presentation() ?? themeLayer)
+            }
+
+            return nil
+        }
+
+        guard let (rootView, rootLayer) = rootLayerTarget() else {
+            return fallback
+        }
+
+        var current: NSView? = view
+        while let currentView = current {
+            if let currentLayer = currentView.layer {
+                let rectInLayerHost = currentView.convert(view.bounds, from: view)
+                let activeLayer = currentLayer.presentation() ?? currentLayer
+                let rectInRoot = activeLayer.convert(rectInLayerHost, to: rootLayer)
+                let rootOrigin = rootView.convert(NSPoint.zero, to: nil)
+                let candidate = rectInRoot.offsetBy(dx: rootOrigin.x, dy: rootOrigin.y)
+                let hasFiniteCandidate =
+                    candidate.origin.x.isFinite &&
+                    candidate.origin.y.isFinite &&
+                    candidate.size.width.isFinite &&
+                    candidate.size.height.isFinite
+                guard hasFiniteCandidate else { return fallback }
+
+                let verticalIntersection = min(candidate.maxY, fallback.maxY) - max(candidate.minY, fallback.minY)
+                let verticalOverlap = max(0, verticalIntersection)
+                let minimumComparableHeight = max(1, min(candidate.height, fallback.height))
+                let hasSubstantialVerticalAgreement = verticalOverlap >= minimumComparableHeight * 0.5
+
+                if hasSubstantialVerticalAgreement {
+                    return candidate
+                }
+
+                // Layer presentation conversion can report vertically inverted or offset values
+                // for AppKit-hosted portal views while still tracking horizontal animation
+                // correctly. Preserve presentation X/width for smooth strip motion, but keep
+                // AppKit's Y/height so the portal does not get hidden as outside host bounds.
+                return NSRect(
+                    x: candidate.origin.x,
+                    y: fallback.origin.y,
+                    width: candidate.width,
+                    height: fallback.height
+                )
+            }
+            current = currentView.superview
+        }
+
+        return fallback
+    }
+
     /// Convert an anchor view's bounds to window coordinates while honoring ancestor clipping.
     /// SwiftUI/AppKit hosting layers can report an anchor bounds wider than its split pane when
     /// intrinsic-size content overflows; intersecting through ancestor bounds gives the effective
     /// visible rect that should drive portal geometry.
     private func effectiveAnchorFrameInWindow(for anchorView: NSView) -> NSRect {
-        var frameInWindow = anchorView.convert(anchorView.bounds, to: nil)
+        var frameInWindow = presentationFrameInWindow(for: anchorView)
         var current = anchorView.superview
         while let ancestor = current {
-            let ancestorBoundsInWindow = ancestor.convert(ancestor.bounds, to: nil)
+            let ancestorBoundsInWindow = presentationFrameInWindow(for: ancestor)
             let finiteAncestorBounds =
                 ancestorBoundsInWindow.origin.x.isFinite &&
                 ancestorBoundsInWindow.origin.y.isFinite &&
@@ -964,6 +1048,86 @@ final class WindowTerminalPortal: NSObject {
         return frameInHost
     }
 
+    private func stabilityFrameInHost(for anchorView: NSView) -> NSRect? {
+        guard let stabilityView = nearestPortalStabilityView(from: anchorView) else { return nil }
+        stabilityView.superview?.layoutSubtreeIfNeeded()
+        let frameInWindow = stabilityView.convert(stabilityView.bounds, to: nil)
+        let frameInHostRaw = hostView.convert(frameInWindow, from: nil)
+        let frameInHost = Self.pixelSnappedRect(frameInHostRaw, in: hostView)
+        let hasFiniteFrame =
+            frameInHost.origin.x.isFinite &&
+            frameInHost.origin.y.isFinite &&
+            frameInHost.size.width.isFinite &&
+            frameInHost.size.height.isFinite
+        guard hasFiniteFrame else { return nil }
+
+        let hostBounds = hostView.bounds
+        let hasFiniteHostBounds =
+            hostBounds.origin.x.isFinite &&
+            hostBounds.origin.y.isFinite &&
+            hostBounds.size.width.isFinite &&
+            hostBounds.size.height.isFinite
+        if hasFiniteHostBounds {
+            let clampedFrame = frameInHost.intersection(hostBounds)
+            if !clampedFrame.isNull, clampedFrame.width > 1, clampedFrame.height > 1 {
+                return clampedFrame
+            }
+        }
+
+        return frameInHost
+    }
+
+#if DEBUG
+    private func debugPresentationFrameInWindow(for view: NSView) -> NSRect {
+        presentationFrameInWindow(for: view)
+    }
+
+    private func debugEffectivePresentationFrameInWindow(for view: NSView) -> NSRect {
+        var frameInWindow = debugPresentationFrameInWindow(for: view)
+        var current = view.superview
+
+        while let ancestor = current {
+            let ancestorFrameInWindow = debugPresentationFrameInWindow(for: ancestor)
+            let finiteAncestorFrame =
+                ancestorFrameInWindow.origin.x.isFinite &&
+                ancestorFrameInWindow.origin.y.isFinite &&
+                ancestorFrameInWindow.size.width.isFinite &&
+                ancestorFrameInWindow.size.height.isFinite
+            if finiteAncestorFrame {
+                frameInWindow = frameInWindow.intersection(ancestorFrameInWindow)
+                if frameInWindow.isNull { return .zero }
+            }
+            if ancestor === installedReferenceView { break }
+            current = ancestor.superview
+        }
+
+        return frameInWindow
+    }
+
+    private func debugVisibleHostedPresentationFrameInWindow(for hostedView: NSView) -> NSRect {
+        let hostedFrameInWindow = debugPresentationFrameInWindow(for: hostedView)
+        let hostFrameInWindow = debugPresentationFrameInWindow(for: hostView)
+        let clippedFrame = hostedFrameInWindow.intersection(hostFrameInWindow)
+        return clippedFrame.isNull ? .zero : clippedFrame
+    }
+
+    func debugMotionSample(forHostedId hostedId: ObjectIdentifier, crop: CGRect) -> DebugTerminalPortalMotionSample? {
+        guard let entry = entriesByHostedId[hostedId],
+              let hostedView = entry.hostedView,
+              let anchorView = entry.anchorView else {
+            return nil
+        }
+
+        return DebugTerminalPortalMotionSample(
+            anchorFrameInWindow: debugEffectivePresentationFrameInWindow(for: anchorView).integral,
+            hostedFrameInWindow: debugVisibleHostedPresentationFrameInWindow(for: hostedView).integral,
+            anchorHidden: Self.isHiddenOrAncestorHidden(anchorView),
+            hostedHidden: hostedView.isHidden,
+            surfaceSample: hostedView.debugSampleIOSurface(normalizedCrop: crop)
+        )
+    }
+#endif
+
     func detachHostedView(withId hostedId: ObjectIdentifier) {
         guard let entry = entriesByHostedId.removeValue(forKey: hostedId) else { return }
         if let anchor = entry.anchorView {
@@ -989,6 +1153,7 @@ final class WindowTerminalPortal: NSObject {
         guard entry.visibleInUI else { return }
         entry.visibleInUI = false
         entry.transientRecoveryRetriesRemaining = 0
+        entry.preserveVisibleRetryCount = 0
         entriesByHostedId[hostedId] = entry
         entry.hostedView?.isHidden = true
 #if DEBUG
@@ -1004,6 +1169,7 @@ final class WindowTerminalPortal: NSObject {
         entry.visibleInUI = visibleInUI
         if !visibleInUI {
             entry.transientRecoveryRetriesRemaining = 0
+            entry.preserveVisibleRetryCount = 0
         }
         entriesByHostedId[hostedId] = entry
     }
@@ -1046,7 +1212,8 @@ final class WindowTerminalPortal: NSObject {
             anchorView: anchorView,
             visibleInUI: visibleInUI,
             zPriority: zPriority,
-            transientRecoveryRetriesRemaining: 0
+            transientRecoveryRetriesRemaining: 0,
+            preserveVisibleRetryCount: 0
         )
 
         let didChangeAnchor: Bool = {
@@ -1337,13 +1504,20 @@ final class WindowTerminalPortal: NSObject {
             targetFrame.width >= Self.minimumRevealWidth &&
             targetFrame.height >= Self.minimumRevealHeight
         let outsideHostBounds = !hasVisibleIntersection
+        let shouldDeferReveal =
+            entry.visibleInUI &&
+            !anchorHidden &&
+            !tinyFrame &&
+            hasFiniteFrame &&
+            !outsideHostBounds &&
+            !revealReadyForDisplay
         let shouldHide =
             !entry.visibleInUI ||
             anchorHidden ||
             tinyFrame ||
             !hasFiniteFrame ||
-            outsideHostBounds
-        let shouldDeferReveal = !shouldHide && hostedView.isHidden && !revealReadyForDisplay
+            outsideHostBounds ||
+            shouldDeferReveal
         let transientRecoveryReason: String? = {
             guard Self.transientRecoveryEnabled else { return nil }
             guard entry.visibleInUI else { return nil }
@@ -1370,6 +1544,45 @@ final class WindowTerminalPortal: NSObject {
             !hostedView.isHidden
 
         let oldFrame = hostedView.frame
+        let stabilityFrame = stabilityFrameInHost(for: anchorView)
+        let stabilityFrameSupportsExistingVisiblePortal: Bool = {
+            guard let stabilityFrame else { return false }
+            guard stabilityFrame.width >= Self.minimumRevealWidth,
+                  stabilityFrame.height >= Self.minimumRevealHeight,
+                  oldFrame.width >= Self.minimumRevealWidth,
+                  oldFrame.height >= Self.minimumRevealHeight else {
+                return false
+            }
+
+            let overlap = oldFrame.intersection(stabilityFrame)
+            guard !overlap.isNull else { return false }
+            return overlap.width >= min(32, oldFrame.width * 0.25)
+        }()
+        let shouldStartPreserveVisibleOnAnchorCollapse =
+            entry.visibleInUI &&
+            !hostedView.isHidden &&
+            (tinyFrame || outsideHostBounds) &&
+            stabilityFrameSupportsExistingVisiblePortal
+        let shouldContinuePreserveVisibleOnAnchorCollapse =
+            entry.visibleInUI &&
+            !hostedView.isHidden &&
+            entry.preserveVisibleRetryCount > 0 &&
+            (tinyFrame || outsideHostBounds || !hasFiniteFrame) &&
+            oldFrame.width >= Self.minimumRevealWidth &&
+            oldFrame.height >= Self.minimumRevealHeight
+        let shouldPreserveVisibleOnAnchorCollapse =
+            shouldStartPreserveVisibleOnAnchorCollapse ||
+            shouldContinuePreserveVisibleOnAnchorCollapse
+        let shouldKeepHiddenForColdReveal =
+            entry.visibleInUI &&
+            hostedView.isHidden &&
+            oldFrame.width <= Self.tinyHideThreshold &&
+            oldFrame.height <= Self.tinyHideThreshold &&
+            !anchorHidden &&
+            hasFiniteFrame &&
+            !outsideHostBounds &&
+            revealReadyForDisplay &&
+            !hostedView.hasRenderableSurfaceContentsForReveal()
 #if DEBUG
         let frameWasClamped = hasFiniteFrame && !Self.rectApproximatelyEqual(frameInHost, targetFrame)
         if frameWasClamped {
@@ -1395,6 +1608,26 @@ final class WindowTerminalPortal: NSObject {
         }
 #endif
 
+        if shouldPreserveVisibleOnAnchorCollapse {
+            if shouldStartPreserveVisibleOnAnchorCollapse {
+                entry.preserveVisibleRetryCount = Self.anchorCollapsePreserveRetryBudget
+            } else {
+                entry.preserveVisibleRetryCount = max(0, entry.preserveVisibleRetryCount - 1)
+            }
+            entriesByHostedId[hostedId] = entry
+#if DEBUG
+            dlog(
+                "portal.hidden.deferKeep hosted=\(portalDebugToken(hostedView)) " +
+                "reason=\(shouldStartPreserveVisibleOnAnchorCollapse ? "stablePaneContainer" : "stablePaneContainerRetry") " +
+                "retries=\(entry.preserveVisibleRetryCount) old=\(portalDebugFrame(oldFrame)) " +
+                "stability=\(portalDebugFrame(stabilityFrame ?? .zero)) frame=\(portalDebugFrame(targetFrame))"
+            )
+#endif
+            scheduleDeferredFullSynchronizeAll()
+            ensureDividerOverlayOnTop()
+            return
+        }
+
         // Hide before updating the frame when this entry should not be visible.
         // This avoids a one-frame flash of unrendered terminal background when a portal
         // briefly transitions through offscreen/tiny geometry during rapid split churn.
@@ -1418,8 +1651,14 @@ final class WindowTerminalPortal: NSObject {
             )
 #endif
         }
+        if entry.preserveVisibleRetryCount != 0 && hasFiniteFrame && !tinyFrame && !outsideHostBounds {
+            entry.preserveVisibleRetryCount = 0
+            entriesByHostedId[hostedId] = entry
+        }
 
-        if hasFiniteFrame && !Self.rectApproximatelyEqual(oldFrame, targetFrame) {
+        let frameChanged = hasFiniteFrame && !Self.rectApproximatelyEqual(oldFrame, targetFrame)
+
+        if frameChanged {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             hostedView.frame = targetFrame
@@ -1448,8 +1687,17 @@ final class WindowTerminalPortal: NSObject {
             }
 #endif
         }
+        if shouldKeepHiddenForColdReveal {
+#if DEBUG
+            dlog(
+                "portal.hidden.deferReveal hosted=\(portalDebugToken(hostedView)) " +
+                "reason=coldSurface frame=\(portalDebugFrame(frameInHost)) contentsReady=0"
+            )
+#endif
+            scheduleDeferredFullSynchronizeAll()
+        }
 
-        if !shouldHide, hostedView.isHidden, revealReadyForDisplay {
+        if !shouldHide, hostedView.isHidden, revealReadyForDisplay, !shouldKeepHiddenForColdReveal {
 #if DEBUG
             dlog(
                 "portal.hidden hosted=\(portalDebugToken(hostedView)) value=0 " +
@@ -1469,6 +1717,13 @@ final class WindowTerminalPortal: NSObject {
 
         if transientRecoveryReason == nil {
             resetTransientRecoveryRetryIfNeeded(forHostedId: hostedId, entry: &entry)
+        }
+
+        if frameChanged, entry.visibleInUI {
+            // SwiftUI paper-canvas motion can continue after the initial geometry callback.
+            // Keep polling on subsequent main-loop turns until the animated anchor and the
+            // portal-hosted terminal settle on the same clipped frame.
+            scheduleDeferredFullSynchronizeAll()
         }
 
 #if DEBUG
@@ -1636,6 +1891,7 @@ enum TerminalWindowPortalRegistry {
     private static var portalsByWindowId: [ObjectIdentifier: WindowTerminalPortal] = [:]
     private static var hostedToWindowId: [ObjectIdentifier: ObjectIdentifier] = [:]
     private static var hasPendingExternalGeometrySyncForAllWindows = false
+    private static var pendingExternalGeometrySyncPassesForAllWindows = 0
 #if DEBUG
     private static var blockedBindCount: Int = 0
     private static var blockedBindReasons: [String: Int] = [:]
@@ -1729,8 +1985,24 @@ enum TerminalWindowPortalRegistry {
         visibleInUI: Bool,
         zPriority: Int = 0,
         expectedSurfaceId: UUID? = nil,
-        expectedGeneration: UInt64? = nil
+        expectedGeneration: UInt64? = nil,
+        deferDuringAutomatedTests: Bool = true
     ) {
+        if deferDuringAutomatedTests, shouldDeferTerminalPortalBindDuringAutomatedTests() {
+            DispatchQueue.main.async {
+                bind(
+                    hostedView: hostedView,
+                    to: anchorView,
+                    visibleInUI: visibleInUI,
+                    zPriority: zPriority,
+                    expectedSurfaceId: expectedSurfaceId,
+                    expectedGeneration: expectedGeneration,
+                    deferDuringAutomatedTests: false
+                )
+            }
+            return
+        }
+
         guard let window = anchorView.window else { return }
 
         let windowId = ObjectIdentifier(window)
@@ -1781,14 +2053,35 @@ enum TerminalWindowPortalRegistry {
         portal.synchronizeHostedViewForAnchor(anchorView)
     }
 
-    static func scheduleExternalGeometrySynchronizeForAllWindows() {
+    static func scheduleExternalGeometrySynchronizeForAllWindows(passes: Int = 3) {
+        Self.pendingExternalGeometrySyncPassesForAllWindows = max(
+            Self.pendingExternalGeometrySyncPassesForAllWindows,
+            max(1, passes)
+        )
         guard !Self.hasPendingExternalGeometrySyncForAllWindows else { return }
         Self.hasPendingExternalGeometrySyncForAllWindows = true
         DispatchQueue.main.async {
+            Self.runScheduledExternalGeometrySynchronizeForAllWindows()
+        }
+    }
+
+    private static func runScheduledExternalGeometrySynchronizeForAllWindows() {
+        guard Self.pendingExternalGeometrySyncPassesForAllWindows > 0 else {
             Self.hasPendingExternalGeometrySyncForAllWindows = false
-            for portal in Self.portalsByWindowId.values {
-                portal.synchronizeAllEntriesFromExternalGeometryChange()
+            return
+        }
+
+        Self.pendingExternalGeometrySyncPassesForAllWindows -= 1
+        for portal in Self.portalsByWindowId.values {
+            portal.synchronizeAllEntriesFromExternalGeometryChange()
+        }
+
+        if Self.pendingExternalGeometrySyncPassesForAllWindows > 0 {
+            DispatchQueue.main.async {
+                Self.runScheduledExternalGeometrySynchronizeForAllWindows()
             }
+        } else {
+            Self.hasPendingExternalGeometrySyncForAllWindows = false
         }
     }
 
@@ -1839,6 +2132,19 @@ enum TerminalWindowPortalRegistry {
 #if DEBUG
     static func debugPortalCount() -> Int {
         portalsByWindowId.count
+    }
+
+    static func debugMotionSample(
+        for hostedView: GhosttySurfaceScrollView,
+        crop: CGRect
+    ) -> DebugTerminalPortalMotionSample? {
+        let hostedId = ObjectIdentifier(hostedView)
+        guard let windowId = hostedToWindowId[hostedId],
+              let portal = portalsByWindowId[windowId] else {
+            return nil
+        }
+
+        return portal.debugMotionSample(forHostedId: hostedId, crop: crop)
     }
 
     static func debugPortalStats() -> [String: Any] {

@@ -132,6 +132,74 @@
         }
       }
     },
+    "cli.pan-workspace.error.dxInteger": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "--dx must be an integer"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "--dx は整数である必要があります"
+          }
+        }
+      }
+    },
+    "cli.pan-workspace.error.dyInteger": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "--dy must be an integer"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "--dy は整数である必要があります"
+          }
+        }
+      }
+    },
+    "cli.pan-workspace.error.requiresDelta": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "pan-workspace requires a non-zero --dx and/or --dy"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "pan-workspace には 0 以外の --dx または --dy が必要です"
+          }
+        }
+      }
+    },
+    "cli.pan-workspace.usage": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Usage: cmux pan-workspace [--workspace <id|ref|index>] [--dx <pixels>] [--dy <pixels>]\n\nPan the paper-canvas viewport for a workspace.\n\nFlags:\n  --workspace <id|ref|index>   Workspace to pan (default: current/$CMUX_WORKSPACE_ID)\n  --dx <pixels>                Horizontal pan delta in pixels\n  --dy <pixels>                Vertical pan delta in pixels\n\nNotes:\n  Positive --dx pans right, negative pans left.\n  Positive --dy pans down, negative pans up.\n  At least one of --dx or --dy must be non-zero.\n\nExample:\n  cmux pan-workspace --dx 400\n  cmux pan-workspace --workspace workspace:2 --dx -240 --dy 180"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使い方: cmux pan-workspace [--workspace <id|ref|index>] [--dx <pixels>] [--dy <pixels>]\n\nワークスペースの paper-canvas ビューポートをパンします。\n\nフラグ:\n  --workspace <id|ref|index>   パンするワークスペース (デフォルト: current/$CMUX_WORKSPACE_ID)\n  --dx <pixels>                水平方向のパン量 (ピクセル)\n  --dy <pixels>                垂直方向のパン量 (ピクセル)\n\nメモ:\n  正の --dx は右へ、負の値は左へパンします。\n  正の --dy は下へ、負の値は上へパンします。\n  --dx と --dy のどちらか一方は 0 以外である必要があります。\n\n例:\n  cmux pan-workspace --dx 400\n  cmux pan-workspace --workspace workspace:2 --dx -240 --dy 180"
+          }
+        }
+      }
+    },
     "applescript.error.disabled": {
       "extractionState": "manual",
       "localizations": {
@@ -18103,6 +18171,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "Terminal Düzeni"
+          }
+        }
+      }
+    },
+    "command.openPaneRight.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pane Layout"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ペインレイアウト"
+          }
+        }
+      }
+    },
+    "command.openPaneRight.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Pane Right"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "右にペインを開く"
           }
         }
       }
@@ -37850,6 +37952,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "Aşağı Böl"
+          }
+        }
+      }
+    },
+    "menu.view.openPaneRight": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Pane Right"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "右にペインを開く"
           }
         }
       }
@@ -59474,6 +59593,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "Aşağı Böl"
+          }
+        }
+      }
+    },
+    "shortcut.openPaneRight.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Pane Right"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "右にペインを開く"
           }
         }
       }

@@ -48,6 +48,9 @@ public struct BonsplitView<Content: View, EmptyContent: View>: View {
                         emptyPaneBuilder(PaneID(id: internalPaneId.id))
                     },
                     appearance: controller.configuration.appearance,
+                    onGeometryChange: { [weak controller] isDragging in
+                        controller?.notifyGeometryChange(isDragging: isDragging)
+                    },
                     showSplitButtons: controller.configuration.allowSplits && controller.configuration.appearance.showSplitButtons,
                     contentViewLifecycle: controller.configuration.contentViewLifecycle
                 )

@@ -1406,6 +1406,38 @@ struct CMUXCLI {
                 print(response)
             }
 
+        case "pan-workspace":
+            let workspaceArg = workspaceFromArgsOrEnv(commandArgs, windowOverride: windowId)
+            let dxRaw = optionValue(commandArgs, name: "--dx")
+            let dyRaw = optionValue(commandArgs, name: "--dy")
+            let dx: Int
+            if let dxRaw {
+                guard let parsed = Int(dxRaw) else {
+                    throw CLIError(message: String(localized: "cli.pan-workspace.error.dxInteger", defaultValue: "--dx must be an integer"))
+                }
+                dx = parsed
+            } else {
+                dx = 0
+            }
+            let dy: Int
+            if let dyRaw {
+                guard let parsed = Int(dyRaw) else {
+                    throw CLIError(message: String(localized: "cli.pan-workspace.error.dyInteger", defaultValue: "--dy must be an integer"))
+                }
+                dy = parsed
+            } else {
+                dy = 0
+            }
+            guard dx != 0 || dy != 0 else {
+                throw CLIError(message: String(localized: "cli.pan-workspace.error.requiresDelta", defaultValue: "pan-workspace requires a non-zero --dx and/or --dy"))
+            }
+
+            var params: [String: Any] = ["dx": dx, "dy": dy]
+            let wsId = try normalizeWorkspaceHandle(workspaceArg, client: client, allowCurrent: true)
+            if let wsId { params["workspace_id"] = wsId }
+            let payload = try client.sendV2(method: "workspace.viewport.pan", params: params)
+            printV2Payload(payload, jsonOutput: jsonOutput, idFormat: idFormat, fallbackText: v2OKSummary(payload, idFormat: idFormat, kinds: ["workspace"]))
+
         case "read-screen":
             let (wsArg, rem0) = parseOption(commandArgs, name: "--workspace")
             let (sfArg, rem1) = parseOption(rem0, name: "--surface")
@@ -4522,6 +4554,9 @@ struct CMUXCLI {
 
             Split the current pane in the given direction.
 
+            Note:
+              Horizontal pane-strip workspaces reject up/down splits with not_supported.
+
             Flags:
               --workspace <id|ref>   Target workspace (default: $CMUX_WORKSPACE_ID)
               --surface <id|ref>     Surface to split from (default: $CMUX_SURFACE_ID)
@@ -4766,6 +4801,26 @@ struct CMUXCLI {
 
             Print the currently selected workspace ID.
             """
+        case "pan-workspace":
+            return String(localized: "cli.pan-workspace.usage", defaultValue: """
+            Usage: cmux pan-workspace [--workspace <id|ref|index>] [--dx <pixels>] [--dy <pixels>]
+
+            Pan the paper-canvas viewport for a workspace.
+
+            Flags:
+              --workspace <id|ref|index>   Workspace to pan (default: current/$CMUX_WORKSPACE_ID)
+              --dx <pixels>                Horizontal pan delta in pixels
+              --dy <pixels>                Vertical pan delta in pixels
+
+            Notes:
+              Positive --dx pans right, negative pans left.
+              Positive --dy pans down, negative pans up.
+              At least one of --dx or --dy must be non-zero.
+
+            Example:
+              cmux pan-workspace --dx 400
+              cmux pan-workspace --workspace workspace:2 --dx -240 --dy 180
+            """)
         case "capture-pane":
             return """
             Usage: cmux capture-pane [--workspace <id|ref>] [--surface <id|ref>] [--scrollback] [--lines <n>]
@@ -8412,6 +8467,7 @@ struct CMUXCLI {
           workspace-action --action <name> [--workspace <id|ref|index>] [--title <text>]
           list-workspaces
           new-workspace [--cwd <path>] [--command <text>]
+          pan-workspace [--workspace <id|ref|index>] [--dx <pixels>] [--dy <pixels>]
           new-split <left|right|up|down> [--workspace <id|ref>] [--surface <id|ref>] [--panel <id|ref>]
           list-panes [--workspace <id|ref>]
           list-pane-surfaces [--workspace <id|ref>] [--pane <id|ref>]

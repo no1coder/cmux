@@ -32,6 +32,15 @@ final class PaperCanvasState {
     var viewportSize: CGSize
     var canvasBounds: CGRect
     let paneGap: CGFloat
+    private var stripState: PaperCanvasStripState
+
+    var showsLeftOverflowHint: Bool {
+        stripState.showsLeftOverflowHint
+    }
+
+    var showsRightOverflowHint: Bool {
+        stripState.showsRightOverflowHint
+    }
 
     init(
         panes: [PaperCanvasPane],
@@ -44,12 +53,19 @@ final class PaperCanvasState {
         self.viewportSize = viewportSize
         self.paneGap = paneGap
         self.canvasBounds = .zero
+        self.stripState = Self.makeStripState(
+            from: panes,
+            viewportSize: viewportSize,
+            viewportOriginX: viewportOrigin.x,
+            paneGap: paneGap
+        )
+        syncPaneFramesFromStripState()
         recomputeCanvasBounds()
         clampViewportOrigin()
     }
 
     func pane(_ paneId: PaneID) -> PaperCanvasPane? {
-        panes.first { $0.pane.id == paneId }
+        return panes.first { $0.pane.id == paneId }
     }
 
     var allPanes: [PaneState] {
@@ -61,7 +77,8 @@ final class PaperCanvasState {
     }
 
     func layoutSnapshot(focusedPaneId: PaneID?) -> PaperCanvasLayoutSnapshot {
-        PaperCanvasLayoutSnapshot(
+        recomputeCanvasBounds()
+        return PaperCanvasLayoutSnapshot(
             panes: panes.map { PaperCanvasPaneSnapshot(paneId: $0.pane.id, frame: $0.frame) },
             viewportOrigin: viewportOrigin,
             canvasBounds: canvasBounds,
@@ -73,6 +90,7 @@ final class PaperCanvasState {
     func addPane(_ pane: PaneState, frame: CGRect) -> PaperCanvasPane {
         let placement = PaperCanvasPane(pane: pane, frame: frame)
         panes.append(placement)
+        rebuildStripStateFromPaneFrames()
         recomputeCanvasBounds()
         return placement
     }
@@ -81,12 +99,121 @@ final class PaperCanvasState {
     func removePane(_ paneId: PaneID) -> PaperCanvasPane? {
         guard let index = panes.firstIndex(where: { $0.pane.id == paneId }) else { return nil }
         let removed = panes.remove(at: index)
+        rebuildStripStateFromPaneFrames()
         recomputeCanvasBounds()
         return removed
     }
 
+    @discardableResult
+    func removePane(_ paneId: PaneID, preferredFocus: PaneID?) -> (removed: PaperCanvasPane, nextFocus: PaneID?)? {
+        guard let index = panes.firstIndex(where: { $0.pane.id == paneId }) else {
+            return nil
+        }
+
+        let nextFocus = stripState.closePane(paneId, preferredFocus: preferredFocus)
+        let removed = panes.remove(at: index)
+        syncPaneFramesFromStripState()
+        recomputeCanvasBounds()
+        clampViewportOrigin()
+        return (removed, nextFocus)
+    }
+
+    @discardableResult
+    func insertPaneRight(
+        _ newPane: PaneState,
+        after targetPaneId: PaneID,
+        requestedWidth: CGFloat,
+        minimumSize: CGSize
+    ) -> CGRect? {
+        syncPaneFramesFromStripState()
+        guard let target = pane(targetPaneId),
+              stripState.openPaneRightIfPresent(
+                  after: targetPaneId,
+                  inserting: newPane.id,
+                  requestedWidth: requestedWidth,
+                  minimumPaneWidth: minimumSize.width
+              ) else {
+            return nil
+        }
+
+        panes.append(
+            PaperCanvasPane(
+                pane: newPane,
+                frame: placeholderFrame(
+                    nextTo: target.frame,
+                    width: max(requestedWidth, minimumSize.width),
+                    minimumHeight: minimumSize.height
+                )
+            )
+        )
+        syncPaneFramesFromStripState()
+        recomputeCanvasBounds()
+        clampViewportOrigin()
+        return self.pane(newPane.id)?.frame
+    }
+
+    func splitPaneRight(
+        _ targetPaneId: PaneID,
+        newPane: PaneState,
+        minimumSize: CGSize
+    ) -> SplitPlacement? {
+        syncPaneFramesFromStripState()
+        guard let target = pane(targetPaneId) else {
+            return nil
+        }
+
+        let targetFrame = target.frame
+        let mode: SplitPlacement.Mode
+        let placeholderWidth: CGFloat
+
+        if stripState.splitRight(targetPaneId, inserting: newPane.id, minimumPaneWidth: minimumSize.width) {
+            mode = .localReflow
+            placeholderWidth = max(floor((targetFrame.width - paneGap) / 2), minimumSize.width)
+        } else {
+            guard stripState.openPaneRightIfPresent(
+                after: targetPaneId,
+                inserting: newPane.id,
+                requestedWidth: targetFrame.width,
+                minimumPaneWidth: minimumSize.width
+            ) else {
+                return nil
+            }
+            mode = .canvasOverflow
+            placeholderWidth = max(targetFrame.width, minimumSize.width)
+        }
+
+        panes.append(
+            PaperCanvasPane(
+                pane: newPane,
+                frame: placeholderFrame(
+                    nextTo: targetFrame,
+                    width: placeholderWidth,
+                    minimumHeight: minimumSize.height
+                )
+            )
+        )
+        syncPaneFramesFromStripState()
+        recomputeCanvasBounds()
+        clampViewportOrigin()
+
+        guard let existingFrame = pane(targetPaneId)?.frame,
+              let newFrame = pane(newPane.id)?.frame else {
+            return nil
+        }
+
+        return SplitPlacement(
+            existingFrame: existingFrame,
+            newFrame: newFrame,
+            mode: mode
+        )
+    }
+
     func updateViewportSize(_ size: CGSize) {
+        let previousViewportSize = viewportSize
         viewportSize = size
+        expandSinglePaneToMatchViewportIfNeeded(previousViewportSize: previousViewportSize)
+        stripState.updateViewportSize(size)
+        syncPaneFramesFromStripState()
         recomputeCanvasBounds()
         clampViewportOrigin()
     }
@@ -121,6 +248,12 @@ final class PaperCanvasState {
         clampViewportOrigin()
     }
 
+    func revealPane(_ paneId: PaneID) {
+        stripState.revealPane(paneId)
+        viewportOrigin.x = stripState.viewportOriginX
+        clampViewportOrigin()
+    }
+
     func panViewport(by delta: CGSize) {
         viewportOrigin.x += delta.width
         viewportOrigin.y += delta.height
@@ -139,18 +272,121 @@ final class PaperCanvasState {
     func clampViewportOrigin() {
         guard viewportSize.width > 0, viewportSize.height > 0 else { return }
 
+        stripState.updateViewportSize(viewportSize)
+        stripState.setViewportOriginX(viewportOrigin.x)
+
         let minX = canvasBounds.minX
         let maxX = max(canvasBounds.minX, canvasBounds.maxX - viewportSize.width)
         let minY = canvasBounds.minY
         let maxY = max(canvasBounds.minY, canvasBounds.maxY - viewportSize.height)
 
-        viewportOrigin.x = min(max(viewportOrigin.x, minX), maxX)
+        viewportOrigin.x = min(max(stripState.viewportOriginX, minX), maxX)
         viewportOrigin.y = min(max(viewportOrigin.y, minY), maxY)
     }
 
     func setViewportOrigin(_ origin: CGPoint) {
         viewportOrigin = origin
         clampViewportOrigin()
+    }
+
+    private func expandSinglePaneToMatchViewportIfNeeded(previousViewportSize: CGSize) {
+        guard panes.count == 1,
+              sizeIsUsable(previousViewportSize),
+              sizeIsUsable(viewportSize),
+              let onlyPane = panes.first else {
+            return
+        }
+
+        let previousViewportFrame = CGRect(origin: .zero, size: previousViewportSize).integral
+        guard onlyPane.frame.equalTo(previousViewportFrame) else {
+            return
+        }
+
+        onlyPane.frame = CGRect(origin: .zero, size: viewportSize).integral
+    }
+
+    private func sizeIsUsable(_ size: CGSize) -> Bool {
+        size.width > 0 && size.height > 0
+    }
+
+    private func placeholderFrame(
+        nextTo targetFrame: CGRect,
+        width: CGFloat,
+        minimumHeight: CGFloat
+    ) -> CGRect {
+        CGRect(
+            x: targetFrame.maxX + paneGap,
+            y: targetFrame.minY,
+            width: width,
+            height: max(targetFrame.height, minimumHeight)
+        ).integral
+    }
+
+    func supportsTopLevelSplit(_ orientation: SplitOrientation) -> Bool {
+        orientation == .horizontal
+    }
+
+    func openPaneRightPlacement(
+        for targetFrame: CGRect,
+        minimumSize: CGSize
+    ) -> CGRect {
+        syncPaneFramesFromStripState()
+
+        let requestedWidth = max(floor(viewportSize.width * (2.0 / 3.0)), minimumSize.width)
+        guard let targetPaneId = paneId(matching: targetFrame) else {
+            let proposedFrame = CGRect(
+                x: targetFrame.maxX + paneGap,
+                y: targetFrame.minY,
+                width: requestedWidth,
+                height: max(targetFrame.height, minimumSize.height)
+            )
+            return resolveCollisions(for: proposedFrame, orientation: .horizontal, insertFirst: false)
+        }
+
+        var proposedStrip = stripState
+        let newPaneId = proposedStrip.openPaneRight(
+            after: targetPaneId,
+            requestedWidth: requestedWidth,
+            minimumPaneWidth: minimumSize.width
+        )
+        guard let stripFrame = proposedStrip.framesByPaneId()[newPaneId] else {
+            let proposedFrame = CGRect(
+                x: targetFrame.maxX + paneGap,
+                y: targetFrame.minY,
+                width: requestedWidth,
+                height: max(targetFrame.height, minimumSize.height)
+            )
+            return resolveCollisions(for: proposedFrame, orientation: .horizontal, insertFirst: false)
+        }
+
+        return CGRect(
+            x: stripFrame.minX,
+            y: targetFrame.minY,
+            width: stripFrame.width,
+            height: max(targetFrame.height, minimumSize.height)
+        ).integral
+    }
+
+    @discardableResult
+    func equalizePaneWidths(minimumWidth: CGFloat) -> Bool {
+        syncPaneFramesFromStripState()
+        guard stripState.items.count > 1 else { return false }
+
+        let paneCount = CGFloat(stripState.items.count)
+        let minimumTotalWidth = max(0, minimumWidth) * paneCount
+        let currentTotalWidth = max(0, stripState.items.reduce(0) { $0 + $1.width })
+        let targetTotalWidth = max(currentTotalWidth, minimumTotalWidth)
+        let baseWidth = floor(targetTotalWidth / paneCount)
+        let trailingRemainder = targetTotalWidth - (baseWidth * paneCount)
+
+        for index in stripState.items.indices {
+            stripState.items[index].width = baseWidth + (index == stripState.items.count - 1 ? trailingRemainder : 0)
+        }
+
+        syncPaneFramesFromStripState()
+        recomputeCanvasBounds()
+        clampViewportOrigin()
+        return true
     }
 
     func applyLayout(
@@ -163,12 +399,83 @@ final class PaperCanvasState {
             placement.frame = frame.integral
         }
 
+        rebuildStripStateFromPaneFrames()
         recomputeCanvasBounds()
         if let viewportOrigin {
             setViewportOrigin(viewportOrigin)
         } else {
             clampViewportOrigin()
         }
+    }
+
+    private func rebuildStripStateFromPaneFrames() {
+        stripState = Self.makeStripState(
+            from: panes,
+            viewportSize: viewportSize,
+            viewportOriginX: viewportOrigin.x,
+            paneGap: paneGap
+        )
+        syncPaneFramesFromStripState()
+    }
+
+    private func syncPaneFramesFromStripState() {
+        stripState.updateViewportSize(viewportSize)
+        let framesByPaneId = stripState.framesByPaneId()
+        let paneOrder = Dictionary(uniqueKeysWithValues: stripState.items.enumerated().map { ($1.paneId, $0) })
+
+        panes.sort { lhs, rhs in
+            let lhsIndex = paneOrder[lhs.pane.id] ?? Int.max
+            let rhsIndex = paneOrder[rhs.pane.id] ?? Int.max
+            if lhsIndex != rhsIndex {
+                return lhsIndex < rhsIndex
+            }
+            return lhs.pane.id.id.uuidString < rhs.pane.id.id.uuidString
+        }
+
+        for placement in panes {
+            guard let stripFrame = framesByPaneId[placement.pane.id] else { continue }
+            placement.frame = CGRect(
+                x: stripFrame.minX,
+                y: placement.frame.minY,
+                width: stripFrame.width,
+                height: placement.frame.height
+            ).integral
+        }
+
+        viewportOrigin.x = stripState.viewportOriginX
+    }
+
+    private func paneId(matching targetFrame: CGRect) -> PaneID? {
+        panes.first { placement in
+            abs(placement.frame.minX - targetFrame.minX) <= 1.0
+                && abs(placement.frame.width - targetFrame.width) <= 1.0
+                && abs(placement.frame.minY - targetFrame.minY) <= 1.0
+                && abs(placement.frame.height - targetFrame.height) <= 1.0
+        }?.pane.id
+    }
+
+    private static func makeStripState(
+        from panes: [PaperCanvasPane],
+        viewportSize: CGSize,
+        viewportOriginX: CGFloat,
+        paneGap: CGFloat
+    ) -> PaperCanvasStripState {
+        let orderedPanes = panes.sorted { lhs, rhs in
+            if abs(lhs.frame.minX - rhs.frame.minX) > 0.001 {
+                return lhs.frame.minX < rhs.frame.minX
+            }
+            return lhs.pane.id.id.uuidString < rhs.pane.id.id.uuidString
+        }
+
+        var state = PaperCanvasStripState(
+            items: orderedPanes.map { .init(paneId: $0.pane.id, width: $0.frame.width) },
+            viewportSize: viewportSize,
+            viewportOriginX: viewportOriginX,
+            paneGap: paneGap
+        )
+        state.updateViewportSize(viewportSize)
+        state.setViewportOriginX(viewportOriginX)
+        return state
     }
 
     @discardableResult
@@ -236,9 +543,13 @@ final class PaperCanvasState {
             )
         }
 
+        rebuildStripStateFromPaneFrames()
         recomputeCanvasBounds()
-        reveal(target.frame)
-        return target.frame
+        guard let resolvedFrame = pane(paneId)?.frame else {
+            return nil
+        }
+        reveal(resolvedFrame)
+        return resolvedFrame
     }
 
     func resolvedSplitPlacement(

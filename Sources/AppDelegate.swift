@@ -8415,6 +8415,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return true
         }
 
+        if matchShortcut(event: event, shortcut: KeyboardShortcutSettings.shortcut(for: .openPaneRight)) {
+#if DEBUG
+            dlog("shortcut.action name=openPaneRight \(debugShortcutRouteSnapshot(event: event))")
+#endif
+            _ = performOpenPaneRightShortcut()
+            return true
+        }
+
         if matchShortcut(event: event, shortcut: KeyboardShortcutSettings.shortcut(for: .splitDown)) {
 #if DEBUG
             dlog("shortcut.action name=splitDown \(debugShortcutRouteSnapshot(event: event))")
@@ -9105,7 +9113,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         #endif
 
         prepareFocusedBrowserDevToolsForSplit(directionLabel: directionLabel)
-        tabManager?.createSplit(direction: direction)
+        let createdPanelId = tabManager?.createSplit(direction: direction)
+        if createdPanelId == nil {
+            NSSound.beep()
+        }
 #if DEBUG
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
             let keyWindow = NSApp.keyWindow
@@ -9132,7 +9143,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
         recordGotoSplitSplitIfNeeded(direction: direction)
 #endif
-        return true
+        return createdPanelId != nil
+    }
+
+    @discardableResult
+    func performOpenPaneRightShortcut() -> Bool {
+        _ = synchronizeActiveMainWindowContext(preferredWindow: NSApp.keyWindow ?? NSApp.mainWindow)
+
+#if DEBUG
+        let focusedPanelBefore = tabManager?.selectedWorkspace?.focusedPanelId?.uuidString.prefix(5) ?? "nil"
+        dlog("pane.open.shortcut dir=right pre focusedPanel=\(focusedPanelBefore)")
+#endif
+
+        prepareFocusedBrowserDevToolsForSplit(directionLabel: "openRight")
+        let createdPanelId = tabManager?.openPaneRight()
+
+#if DEBUG
+        dlog("pane.open.shortcut dir=right post created=\(createdPanelId?.uuidString.prefix(5) ?? "nil")")
+#endif
+
+        return createdPanelId != nil
     }
 
     @discardableResult
