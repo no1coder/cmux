@@ -12,7 +12,13 @@ assert_job_timeout() {
   if ! awk -v job_header="  ${job_name}:" -v timeout_line="timeout-minutes: ${timeout_minutes}" '
     $0 == job_header { in_job=1; next }
     in_job && /^  [^[:space:]]/ { in_job=0 }
-    in_job && index($0, timeout_line) { found=1 }
+    in_job {
+      line=$0
+      sub(/^[[:space:]]+/, "", line)
+      if (line == timeout_line) {
+        found=1
+      }
+    }
     END { exit !found }
   ' "$CI_WORKFLOW_FILE"; then
     echo "FAIL: ${job_name} must keep timeout-minutes: ${timeout_minutes}"
