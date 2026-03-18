@@ -4627,6 +4627,15 @@ enum SidebarBranchOrdering {
             }
         }
 
+        func checksPriority(_ checks: SidebarPullRequestChecksStatus?) -> Int {
+            switch checks {
+            case .fail: return 3
+            case .pending: return 2
+            case .pass: return 1
+            case nil: return 0
+            }
+        }
+
         func normalizedReviewURLKey(for url: URL) -> String {
             guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
                 return url.absoluteString
@@ -4662,6 +4671,9 @@ enum SidebarBranchOrdering {
             }
             guard let existing = pullRequestsByKey[key] else { continue }
             if statusPriority(state.status) > statusPriority(existing.status) {
+                pullRequestsByKey[key] = state
+            } else if state.status == existing.status,
+                      checksPriority(state.checks) > checksPriority(existing.checks) {
                 pullRequestsByKey[key] = state
             }
         }
@@ -5710,14 +5722,27 @@ final class Workspace: Identifiable, ObservableObject {
         status: SidebarPullRequestStatus,
         checks: SidebarPullRequestChecksStatus? = nil
     ) {
+        let existing = panelPullRequests[panelId]
+        let resolvedChecks: SidebarPullRequestChecksStatus? = {
+            if let checks {
+                return checks
+            }
+            guard let existing,
+                  existing.number == number,
+                  existing.label == label,
+                  existing.url == url,
+                  existing.status == status else {
+                return nil
+            }
+            return existing.checks
+        }()
         let state = SidebarPullRequestState(
             number: number,
             label: label,
             url: url,
             status: status,
-            checks: checks
+            checks: resolvedChecks
         )
-        let existing = panelPullRequests[panelId]
         if existing != state {
             panelPullRequests[panelId] = state
         }

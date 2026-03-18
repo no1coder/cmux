@@ -10771,6 +10771,7 @@ private struct TabItemView: View, Equatable {
                             HStack(spacing: 4) {
                                 PullRequestStatusIcon(
                                     status: pullRequest.status,
+                                    checks: pullRequest.checks,
                                     color: pullRequestForegroundColor
                                 )
                                 Text("\(pullRequest.label) #\(pullRequest.number)")
@@ -11473,6 +11474,7 @@ private struct TabItemView: View, Equatable {
         let label: String
         let url: URL
         let status: SidebarPullRequestStatus
+        let checks: SidebarPullRequestChecksStatus?
     }
 
     private func pullRequestDisplays(orderedPanelIds: [UUID]) -> [PullRequestDisplay] {
@@ -11482,7 +11484,8 @@ private struct TabItemView: View, Equatable {
                 number: pullRequest.number,
                 label: pullRequest.label,
                 url: pullRequest.url,
-                status: pullRequest.status
+                status: pullRequest.status,
+                checks: pullRequest.checks
             )
         }
     }
@@ -11563,13 +11566,14 @@ private struct TabItemView: View, Equatable {
 
     private struct PullRequestStatusIcon: View {
         let status: SidebarPullRequestStatus
+        let checks: SidebarPullRequestChecksStatus?
         let color: Color
         private static let frameSize: CGFloat = 12
 
         var body: some View {
             switch status {
             case .open:
-                PullRequestOpenIcon(color: color)
+                openIcon
             case .merged:
                 PullRequestMergedIcon(color: color)
             case .closed:
@@ -11577,6 +11581,29 @@ private struct TabItemView: View, Equatable {
                     .font(.system(size: 7, weight: .regular))
                     .foregroundColor(color)
                     .frame(width: Self.frameSize, height: Self.frameSize)
+            }
+        }
+
+        @ViewBuilder
+        private var openIcon: some View {
+            switch checks {
+            case .pass:
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundColor(.green)
+                    .frame(width: Self.frameSize, height: Self.frameSize)
+            case .fail:
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundColor(.red)
+                    .frame(width: Self.frameSize, height: Self.frameSize)
+            case .pending:
+                Image(systemName: "clock.fill")
+                    .font(.system(size: 7, weight: .semibold))
+                    .foregroundColor(.orange)
+                    .frame(width: Self.frameSize, height: Self.frameSize)
+            case nil:
+                PullRequestOpenIcon(color: color)
             }
         }
     }

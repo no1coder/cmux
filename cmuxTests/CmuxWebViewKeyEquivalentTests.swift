@@ -7286,6 +7286,62 @@ final class SidebarBranchOrderingTests: XCTestCase {
         )
     }
 
+    func testOrderedUniquePullRequestsPrefersEntryWithChecksWhenStatusesMatch() {
+        let first = UUID()
+        let second = UUID()
+
+        let pullRequests = SidebarBranchOrdering.orderedUniquePullRequests(
+            orderedPanelIds: [first, second],
+            panelPullRequests: [
+                first: pullRequestState(
+                    number: 42,
+                    label: "PR",
+                    url: "https://github.com/manaflow-ai/cmux/pull/42",
+                    status: .open
+                ),
+                second: pullRequestState(
+                    number: 42,
+                    label: "PR",
+                    url: "https://github.com/manaflow-ai/cmux/pull/42",
+                    status: .open,
+                    checks: .pass
+                )
+            ],
+            fallbackPullRequest: nil
+        )
+
+        XCTAssertEqual(pullRequests.count, 1)
+        XCTAssertEqual(pullRequests.first?.checks, .pass)
+    }
+
+    @MainActor
+    func testUpdatePanelPullRequestPreservesExistingChecksWhenUpdateOmitsThem() {
+        let workspace = Workspace(title: "Tests", workingDirectory: FileManager.default.currentDirectoryPath, portOrdinal: 0)
+        guard let panelId = workspace.focusedPanelId else {
+            XCTFail("Expected focused panel for new workspace")
+            return
+        }
+
+        workspace.updatePanelPullRequest(
+            panelId: panelId,
+            number: 42,
+            label: "PR",
+            url: URL(string: "https://github.com/manaflow-ai/cmux/pull/42")!,
+            status: .open,
+            checks: .pass
+        )
+        workspace.updatePanelPullRequest(
+            panelId: panelId,
+            number: 42,
+            label: "PR",
+            url: URL(string: "https://github.com/manaflow-ai/cmux/pull/42")!,
+            status: .open
+        )
+
+        XCTAssertEqual(workspace.panelPullRequests[panelId]?.checks, .pass)
+        XCTAssertEqual(workspace.pullRequest?.checks, .pass)
+    }
+
     func testOrderedUniquePullRequestsUsesFallbackWhenNoPanelPullRequestsExist() {
         let fallback = pullRequestState(
             number: 11,
