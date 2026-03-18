@@ -572,7 +572,7 @@ jobs:
     needs:
       - tests-build-and-lag-attempt-1
       - tests-build-and-lag-attempt-2
-    runs-on: warp-macos-15-arm64-6x
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Verify lag regression result
@@ -827,7 +827,7 @@ jobs:
     needs:
       - ui-display-resolution-regression-attempt-1
       - ui-display-resolution-regression-attempt-2
-    runs-on: warp-macos-15-arm64-6x
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Verify at least one display regression attempt passed
