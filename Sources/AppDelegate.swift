@@ -2219,6 +2219,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             let feed = env["CMUX_UI_TEST_FEED_URL"] ?? "<nil>"
             UpdateLogStore.shared.append("ui test env: trigger=\(trigger) feed=\(feed)")
         }
+        if isRunningUnderXCTest {
+            NSApp.setActivationPolicy(.regular)
+            if NSApp.windows.isEmpty {
+                self.openNewMainWindow(nil)
+            }
+            for window in NSApp.windows {
+                window.orderFrontRegardless()
+                window.makeKeyAndOrderFront(nil)
+            }
+            NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            NSApp.activate(ignoringOtherApps: true)
+            self.writeUITestDiagnosticsIfNeeded(stage: "afterImmediateForceWindow")
+        }
         if env["CMUX_UI_TEST_TRIGGER_UPDATE_CHECK"] == "1" {
             UpdateLogStore.shared.append("ui test trigger update check detected")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in

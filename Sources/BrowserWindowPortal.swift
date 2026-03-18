@@ -3439,6 +3439,14 @@ final class WindowBrowserPortal: NSObject {
         if forcePresentationRefresh {
             refreshReasons.append("anchor")
         }
+        if !shouldHide,
+           entry.visibleInUI,
+           !Self.rectApproximatelyEqual(oldFrame, targetFrame) {
+            // SwiftUI paper-canvas motion can continue after the initial geometry callback.
+            // Keep polling on subsequent main-loop turns until the animated anchor and the
+            // portal-hosted browser settle on the same clipped frame.
+            scheduleDeferredFullSynchronizeAll()
+        }
         if transientRecoveryReason == nil {
             resetTransientRecoveryRetryIfNeeded(forWebViewId: webViewId, entry: &entry)
         }
