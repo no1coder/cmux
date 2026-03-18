@@ -59,9 +59,8 @@ final class DisplayResolutionRegressionUITests: XCTestCase {
         app.launchEnvironment["CMUX_UI_TEST_TARGET_DISPLAY_ID"] = targetDisplayID
         app.launchEnvironment["CMUX_TAG"] = launchTag
         app.launch()
-        app.activate()
-
-        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 12.0), "Expected cmux window to appear")
+        // Self-hosted CI runners can keep the app backgrounded even while its window and
+        // automation socket are live, so don't require foreground activation here.
         guard let resolvedSocketPath = resolveSocketPath(timeout: 12.0) else {
             XCTFail(
                 "Expected control socket to respond. requested=\(socketPath) tag=\(launchTag) " +
