@@ -2585,6 +2585,7 @@ final class TerminalSurface: Identifiable, ObservableObject {
     }
     private struct PortalHostLease {
         let hostId: ObjectIdentifier
+        let paneId: UUID
         let inWindow: Bool
         let area: CGFloat
     }
@@ -2742,12 +2743,13 @@ final class TerminalSurface: Identifiable, ObservableObject {
         initialCommand
     }
 
-    func debugPortalHostLease() -> (hostId: String?, inWindow: Bool?, area: CGFloat?) {
+    func debugPortalHostLease() -> (hostId: String?, paneId: UUID?, inWindow: Bool?, area: CGFloat?) {
         guard let activePortalHostLease else {
-            return (nil, nil, nil)
+            return (nil, nil, nil, nil)
         }
         return (
             hostId: String(describing: activePortalHostLease.hostId),
+            paneId: activePortalHostLease.paneId,
             inWindow: activePortalHostLease.inWindow,
             area: activePortalHostLease.area
         )
@@ -2777,12 +2779,14 @@ final class TerminalSurface: Identifiable, ObservableObject {
 
     func claimPortalHost(
         hostId: ObjectIdentifier,
+        paneId: PaneID,
         inWindow: Bool,
         bounds: CGRect,
         reason: String
     ) -> Bool {
         let next = PortalHostLease(
             hostId: hostId,
+            paneId: paneId.id,
             inWindow: inWindow,
             area: Self.portalHostArea(for: bounds)
         )
@@ -2795,7 +2799,10 @@ final class TerminalSurface: Identifiable, ObservableObject {
 
             let currentUsable = Self.portalHostIsUsable(current)
             let nextUsable = Self.portalHostIsUsable(next)
+            // A dragged terminal must hand off immediately when it moves to a different pane.
+            // Waiting for the old host to become "worse" leaves the moved pane blank/stale.
             let shouldReplace =
+                current.paneId != paneId.id ||
                 !currentUsable ||
                 (nextUsable && next.area > (current.area * Self.portalHostReplacementAreaGainRatio))
 
@@ -2803,9 +2810,11 @@ final class TerminalSurface: Identifiable, ObservableObject {
 #if DEBUG
                 dlog(
                     "terminal.portal.host.claim surface=\(id.uuidString.prefix(5)) " +
-                    "reason=\(reason) host=\(hostId) inWin=\(inWindow ? 1 : 0) " +
+                    "reason=\(reason) host=\(hostId) pane=\(paneId.id.uuidString.prefix(5)) " +
+                    "inWin=\(inWindow ? 1 : 0) " +
                     "size=\(String(format: "%.1fx%.1f", bounds.width, bounds.height)) " +
-                    "replacingHost=\(current.hostId) replacingInWin=\(current.inWindow ? 1 : 0) " +
+                    "replacingHost=\(current.hostId) replacingPane=\(current.paneId.uuidString.prefix(5)) " +
+                    "replacingInWin=\(current.inWindow ? 1 : 0) " +
                     "replacingArea=\(String(format: "%.1f", current.area))"
                 )
 #endif
@@ -2816,9 +2825,11 @@ final class TerminalSurface: Identifiable, ObservableObject {
 #if DEBUG
             dlog(
                 "terminal.portal.host.skip surface=\(id.uuidString.prefix(5)) " +
-                "reason=\(reason) host=\(hostId) inWin=\(inWindow ? 1 : 0) " +
+                "reason=\(reason) host=\(hostId) pane=\(paneId.id.uuidString.prefix(5)) " +
+                "inWin=\(inWindow ? 1 : 0) " +
                 "size=\(String(format: "%.1fx%.1f", bounds.width, bounds.height)) " +
-                "ownerHost=\(current.hostId) ownerInWin=\(current.inWindow ? 1 : 0) " +
+                "ownerHost=\(current.hostId) ownerPane=\(current.paneId.uuidString.prefix(5)) " +
+                "ownerInWin=\(current.inWindow ? 1 : 0) " +
                 "ownerArea=\(String(format: "%.1f", current.area))"
             )
 #endif
@@ -2829,7 +2840,8 @@ final class TerminalSurface: Identifiable, ObservableObject {
 #if DEBUG
         dlog(
             "terminal.portal.host.claim surface=\(id.uuidString.prefix(5)) " +
-            "reason=\(reason) host=\(hostId) inWin=\(inWindow ? 1 : 0) " +
+            "reason=\(reason) host=\(hostId) pane=\(paneId.id.uuidString.prefix(5)) " +
+            "inWin=\(inWindow ? 1 : 0) " +
             "size=\(String(format: "%.1fx%.1f", bounds.width, bounds.height)) replacingHost=nil"
         )
 #endif
@@ -2842,7 +2854,8 @@ final class TerminalSurface: Identifiable, ObservableObject {
 #if DEBUG
         dlog(
             "terminal.portal.host.release surface=\(id.uuidString.prefix(5)) " +
-            "reason=\(reason) host=\(hostId) inWin=\(current.inWindow ? 1 : 0) " +
+            "reason=\(reason) host=\(hostId) pane=\(current.paneId.uuidString.prefix(5)) " +
+            "inWin=\(current.inWindow ? 1 : 0) " +
             "area=\(String(format: "%.1f", current.area))"
         )
 #endif
@@ -8759,6 +8772,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
     @Environment(\.paneDropZone) var paneDropZone
 
     let terminalSurface: TerminalSurface
+    let paneId: PaneID
     var isActive: Bool = true
     var isVisibleInUI: Bool = true
     var portalZPriority: Int = 0
@@ -8938,6 +8952,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
         let hostOwnsPortalNow = hostContainer.map { host in
             terminalSurface.claimPortalHost(
                 hostId: ObjectIdentifier(host),
+                paneId: paneId,
                 inWindow: host.window != nil,
                 bounds: host.bounds,
                 reason: "update"
@@ -8999,6 +9014,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
                 guard coordinator.attachGeneration == generation else { return }
                 guard terminalSurface.claimPortalHost(
                     hostId: ObjectIdentifier(host),
+                    paneId: paneId,
                     inWindow: host.window != nil,
                     bounds: host.bounds,
                     reason: "didMoveToWindow"
@@ -9024,6 +9040,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
                 guard coordinator.attachGeneration == generation else { return }
                 guard terminalSurface.claimPortalHost(
                     hostId: ObjectIdentifier(host),
+                    paneId: paneId,
                     inWindow: host.window != nil,
                     bounds: host.bounds,
                     reason: "geometryChanged"
