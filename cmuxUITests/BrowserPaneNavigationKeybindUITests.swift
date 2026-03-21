@@ -1392,13 +1392,15 @@ final class BrowserPaneNavigationKeybindUITests: XCTestCase {
     }
 
     private func browserWaitForArrowHarness(surfaceId: String) -> (terminationStatus: Int32, stdout: String, stderr: String) {
+        let timeoutMs = 8_000
         let response = browserSocketJSON(
             method: "browser.wait",
             params: [
                 "surface_id": surfaceId,
-                "timeout_ms": 8000,
+                "timeout_ms": timeoutMs,
                 "function": "String(document.readyState || '') === 'complete' && !!(document.body || document.documentElement)"
-            ]
+            ],
+            responseTimeout: (Double(timeoutMs) / 1000.0) + 3.0
         )
         guard let response else {
             return (terminationStatus: 1, stdout: "", stderr: "No browser.wait response")
@@ -1474,13 +1476,17 @@ final class BrowserPaneNavigationKeybindUITests: XCTestCase {
         return json
     }
 
-    private func browserSocketJSON(method: String, params: [String: Any]) -> [String: Any]? {
+    private func browserSocketJSON(
+        method: String,
+        params: [String: Any],
+        responseTimeout: TimeInterval = 8.0
+    ) -> [String: Any]? {
         let request: [String: Any] = [
             "id": UUID().uuidString,
             "method": method,
             "params": params
         ]
-        return ControlSocketClient(path: socketPath, responseTimeout: 8.0).sendJSON(request)
+        return ControlSocketClient(path: socketPath, responseTimeout: responseTimeout).sendJSON(request)
     }
 
     private func browserSocketErrorDescription(_ response: [String: Any]) -> String {
