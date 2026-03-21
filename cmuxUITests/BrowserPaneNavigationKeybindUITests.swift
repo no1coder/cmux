@@ -23,6 +23,9 @@ final class BrowserPaneNavigationKeybindUITests: XCTestCase {
                   !contents.isEmpty else {
                 return
             }
+            print("UI_TEST_LAUNCH_DIAGNOSTICS_BEGIN")
+            print(contents)
+            print("UI_TEST_LAUNCH_DIAGNOSTICS_END")
             let attachment = XCTAttachment(string: contents)
             attachment.name = "ui-test-launch-diagnostics"
             attachment.lifetime = .deleteOnSuccess
