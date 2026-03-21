@@ -158,8 +158,187 @@ struct WorkspaceRemoteDaemonManifest: Decodable, Equatable {
     }
 }
 
+private struct BonsplitCompatibilityTabIDPayload: Codable {
+    let id: UUID
+}
+
+extension TabID {
+    init(uuid: UUID) {
+        let payload = BonsplitCompatibilityTabIDPayload(id: uuid)
+        let decoder = JSONDecoder()
+        let encoder = JSONEncoder()
+
+        do {
+            let data = try encoder.encode(payload)
+            self = try decoder.decode(TabID.self, from: data)
+        } catch {
+            preconditionFailure("Failed to construct Bonsplit TabID compatibility payload: \(error)")
+        }
+    }
+
+    var uuid: UUID {
+        if let id = Mirror(reflecting: self).children.first(where: { $0.label == "id" })?.value as? UUID {
+            return id
+        }
+
+        let decoder = JSONDecoder()
+        let encoder = JSONEncoder()
+
+        do {
+            let data = try encoder.encode(self)
+            return try decoder.decode(BonsplitCompatibilityTabIDPayload.self, from: data).id
+        } catch {
+            preconditionFailure("Failed to read Bonsplit TabID compatibility payload: \(error)")
+        }
+    }
+}
+
+extension BonsplitController {
+    struct ExternalTabDropRequest {
+        enum Destination {
+            case insert(targetPane: PaneID, targetIndex: Int?)
+            case split(targetPane: PaneID, orientation: SplitOrientation, insertFirst: Bool)
+        }
+
+        let tabId: TabID
+        let sourcePaneId: PaneID
+        let destination: Destination
+
+        init(tabId: TabID, sourcePaneId: PaneID, destination: Destination) {
+            self.tabId = tabId
+            self.sourcePaneId = sourcePaneId
+            self.destination = destination
+        }
+    }
+}
+
+@MainActor
+private enum BonsplitCompatibilityStateStore {
+    struct State {
+        var contextMenuShortcuts: [TabContextAction: KeyboardShortcut] = [:]
+        var onExternalTabDrop: ((BonsplitController.ExternalTabDropRequest) -> Bool)?
+        var onTabCloseRequest: ((TabID, PaneID?) -> Void)?
+        var zoomedPaneId: PaneID?
+    }
+
+    static var states: [ObjectIdentifier: State] = [:]
+
+    static func state(for controller: BonsplitController) -> State {
+        states[ObjectIdentifier(controller), default: State()]
+    }
+
+    static func update(for controller: BonsplitController, _ mutate: (inout State) -> Void) {
+        let key = ObjectIdentifier(controller)
+        var current = states[key, default: State()]
+        mutate(&current)
+        if current.contextMenuShortcuts.isEmpty,
+           current.onExternalTabDrop == nil,
+           current.onTabCloseRequest == nil,
+           current.zoomedPaneId == nil {
+            states.removeValue(forKey: key)
+        } else {
+            states[key] = current
+        }
+    }
+
+    static func validatedZoomedPaneId(for controller: BonsplitController) -> PaneID? {
+        let key = ObjectIdentifier(controller)
+        guard let paneId = states[key]?.zoomedPaneId else {
+            return nil
+        }
+
+        guard controller.allPaneIds.contains(paneId) else {
+            update(for: controller) { $0.zoomedPaneId = nil }
+            return nil
+        }
+
+        return paneId
+    }
+}
+
+extension BonsplitController {
+    var contextMenuShortcuts: [TabContextAction: KeyboardShortcut] {
+        get {
+            BonsplitCompatibilityStateStore.state(for: self).contextMenuShortcuts
+        }
+        set {
+            BonsplitCompatibilityStateStore.update(for: self) { $0.contextMenuShortcuts = newValue }
+        }
+    }
+
+    var onExternalTabDrop: ((ExternalTabDropRequest) -> Bool)? {
+        get {
+            BonsplitCompatibilityStateStore.state(for: self).onExternalTabDrop
+        }
+        set {
+            BonsplitCompatibilityStateStore.update(for: self) { $0.onExternalTabDrop = newValue }
+        }
+    }
+
+    var onTabCloseRequest: ((TabID, PaneID?) -> Void)? {
+        get {
+            BonsplitCompatibilityStateStore.state(for: self).onTabCloseRequest
+        }
+        set {
+            BonsplitCompatibilityStateStore.update(for: self) { $0.onTabCloseRequest = newValue }
+        }
+    }
+
+    var zoomedPaneId: PaneID? {
+        get {
+            BonsplitCompatibilityStateStore.validatedZoomedPaneId(for: self)
+        }
+        set {
+            guard let newValue else {
+                BonsplitCompatibilityStateStore.update(for: self) { $0.zoomedPaneId = nil }
+                return
+            }
+
+            guard allPaneIds.contains(newValue) else {
+                BonsplitCompatibilityStateStore.update(for: self) { $0.zoomedPaneId = nil }
+                return
+            }
+
+            BonsplitCompatibilityStateStore.update(for: self) { $0.zoomedPaneId = newValue }
+        }
+    }
+
+    var isSplitZoomed: Bool {
+        zoomedPaneId != nil
+    }
+
+    @discardableResult
+    func clearPaneZoom() -> Bool {
+        guard zoomedPaneId != nil else {
+            return false
+        }
+
+        BonsplitCompatibilityStateStore.update(for: self) { $0.zoomedPaneId = nil }
+        return true
+    }
+
+    @discardableResult
+    func togglePaneZoom(inPane paneId: PaneID) -> Bool {
+        guard allPaneIds.contains(paneId) else {
+            return false
+        }
+
+        if zoomedPaneId == paneId {
+            return clearPaneZoom()
+        }
+
+        BonsplitCompatibilityStateStore.update(for: self) { $0.zoomedPaneId = paneId }
+        return true
+    }
+}
+
 extension Workspace {
+    private static var compatibilityToggleZoomContextAction: TabContextAction? {
+        TabContextAction(rawValue: "toggleZoom")
+    }
+
     nonisolated static let remoteDaemonManifestInfoKey = WorkspaceRemoteSessionController.remoteDaemonManifestInfoKey
+    typealias LocalRemoteDaemonBuildPlan = WorkspaceRemoteSessionController.LocalRemoteDaemonBuildPlan
 
     nonisolated static func remoteDaemonManifest(from infoDictionary: [String: Any]?) -> WorkspaceRemoteDaemonManifest? {
         WorkspaceRemoteSessionController.remoteDaemonManifest(from: infoDictionary)
@@ -175,6 +354,34 @@ extension Workspace {
             version: version,
             goOS: goOS,
             goArch: goArch,
+            fileManager: fileManager
+        )
+    }
+
+    nonisolated static func localRemoteDaemonBuildPlan(
+        repoRoot: URL,
+        goOS: String,
+        goArch: String,
+        version: String,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        fileManager: FileManager = .default
+    ) throws -> LocalRemoteDaemonBuildPlan {
+        try WorkspaceRemoteSessionController.localRemoteDaemonBuildPlan(
+            repoRoot: repoRoot,
+            goOS: goOS,
+            goArch: goArch,
+            version: version,
+            environment: environment,
+            fileManager: fileManager
+        )
+    }
+
+    nonisolated static func findRepoRoot(
+        startingAtCandidates candidates: [URL],
+        fileManager: FileManager
+    ) -> URL? {
+        WorkspaceRemoteSessionController.findRepoRoot(
+            startingAtCandidates: candidates,
             fileManager: fileManager
         )
     }
@@ -8373,11 +8580,13 @@ final class Workspace: Identifiable, ObservableObject {
 
     static func buildContextMenuShortcuts() -> [TabContextAction: KeyboardShortcut] {
         var shortcuts: [TabContextAction: KeyboardShortcut] = [:]
-        let mappings: [(TabContextAction, KeyboardShortcutSettings.Action)] = [
+        var mappings: [(TabContextAction, KeyboardShortcutSettings.Action)] = [
             (.rename, .renameTab),
-            (.toggleZoom, .toggleSplitZoom),
             (.newTerminalToRight, .newSurface),
         ]
+        if let toggleZoomAction = compatibilityToggleZoomContextAction {
+            mappings.append((toggleZoomAction, .toggleSplitZoom))
+        }
         for (contextAction, settingsAction) in mappings {
             let stored = KeyboardShortcutSettings.shortcut(for: settingsAction)
             if let key = stored.keyEquivalent {
@@ -9701,6 +9910,10 @@ extension Workspace: BonsplitDelegate {
     }
 
     func splitTabBar(_ controller: BonsplitController, shouldCloseTab tab: Bonsplit.Tab, inPane pane: PaneID) -> Bool {
+        if shouldTreatCurrentEventAsExplicitFocusIntent() {
+            controller.onTabCloseRequest?(tab.id, pane)
+        }
+
         func recordPostCloseSelection() {
             let tabs = controller.tabs(inPane: pane)
             guard let idx = tabs.firstIndex(where: { $0.id == tab.id }) else {
@@ -10259,8 +10472,6 @@ extension Workspace: BonsplitDelegate {
             closeTabs(tabIdsToRight(of: tab.id, inPane: pane))
         case .closeOthers:
             closeTabs(tabIdsToCloseOthers(of: tab.id, inPane: pane))
-        case .move:
-            promptMovePanel(tabId: tab.id)
         case .newTerminalToRight:
             createTerminalToRight(of: tab.id, inPane: pane)
         case .newBrowserToRight:
@@ -10281,11 +10492,16 @@ extension Workspace: BonsplitDelegate {
         case .markAsUnread:
             guard let panelId = panelIdFromSurfaceId(tab.id) else { return }
             markPanelUnread(panelId)
-        case .toggleZoom:
-            guard let panelId = panelIdFromSurfaceId(tab.id) else { return }
-            toggleSplitZoom(panelId: panelId)
         @unknown default:
-            break
+            switch action.rawValue {
+            case "move":
+                promptMovePanel(tabId: tab.id)
+            case "toggleZoom":
+                guard let panelId = panelIdFromSurfaceId(tab.id) else { return }
+                toggleSplitZoom(panelId: panelId)
+            default:
+                break
+            }
         }
     }
 
