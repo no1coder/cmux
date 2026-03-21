@@ -77,6 +77,7 @@ final class AutomationSocketUITests: XCTestCase {
             return
         }
         socketPath = resolvedPath
+        XCTAssertTrue(waitForSocketPong(timeout: 12.0), "Expected control socket to respond at \(socketPath)")
 
         guard let target = ensureTerminalSurface(timeout: 10.0) else {
             XCTFail(
@@ -160,6 +161,16 @@ final class AutomationSocketUITests: XCTestCase {
         return XCTWaiter().wait(for: [expectation], timeout: timeout) == .completed
     }
 
+    private func waitForSocketPong(timeout: TimeInterval) -> Bool {
+        let expectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                self.socketCommand("ping", responseTimeout: 1.5) == "PONG"
+            },
+            object: NSObject()
+        )
+        return XCTWaiter().wait(for: [expectation], timeout: timeout) == .completed
+    }
+
     private func resolveSocketPath(timeout: TimeInterval) -> String? {
         guard waitForSocket(exists: true, timeout: timeout) else {
             return nil
@@ -220,18 +231,23 @@ final class AutomationSocketUITests: XCTestCase {
     }
 
     private func socketCommand(_ command: String, responseTimeout: TimeInterval = 2.0) -> String? {
-        ControlSocketClient(path: socketPath, responseTimeout: responseTimeout).sendLine(command)
+        NetcatSocketClient(path: socketPath, responseTimeout: responseTimeout).sendLine(command)
     }
 
     private func ensureTerminalSurface(timeout: TimeInterval) -> (workspaceId: String, surfaceId: String)? {
         ensureTerminalSurfaceFailure = ""
         var traceParts: [String] = [
+            "ping=\(socketCommand("ping", responseTimeout: 1.5) ?? "<nil>")",
             "current-window=\(socketCommand("current_window", responseTimeout: 4.0) ?? "<nil>")",
             "current-workspace=\(socketCommand("current_workspace", responseTimeout: 4.0) ?? "<nil>")",
             "list-workspaces.initial=\(socketCommand("list_workspaces", responseTimeout: 4.0) ?? "<nil>")",
             "list-surfaces.initial=\(socketCommand("list_surfaces", responseTimeout: 4.0) ?? "<nil>")",
         ]
 
+        let foundExistingSurface = waitForCondition(timeout: min(timeout, 6.0)) {
+            self.terminalSurface() != nil
+        }
+        traceParts.append("existing-surface-ready=\(foundExistingSurface ? "1" : "0")")
         if let target = terminalSurface() {
             ensureTerminalSurfaceFailure = traceParts.joined(separator: " | ")
             return target
@@ -526,7 +542,7 @@ final class AutomationSocketUITests: XCTestCase {
         return unique
     }
 
-    private final class ControlSocketClient {
+    private final class NetcatSocketClient {
         private let path: String
         private let responseTimeout: TimeInterval
 
@@ -536,82 +552,39 @@ final class AutomationSocketUITests: XCTestCase {
         }
 
         func sendLine(_ line: String) -> String? {
-            let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-            guard fd >= 0 else { return nil }
-            defer { close(fd) }
+            let netcatPath = "/usr/bin/nc"
+            guard FileManager.default.isExecutableFile(atPath: netcatPath) else { return nil }
 
-#if os(macOS)
-            var noSigPipe: Int32 = 1
-            _ = withUnsafePointer(to: &noSigPipe) { ptr in
-                setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, ptr, socklen_t(MemoryLayout<Int32>.size))
-            }
-#endif
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: netcatPath)
+            process.arguments = ["-U", path, "-w", String(max(1, Int(ceil(responseTimeout))))]
 
-            var addr = sockaddr_un()
-            memset(&addr, 0, MemoryLayout<sockaddr_un>.size)
-            addr.sun_family = sa_family_t(AF_UNIX)
+            let inputPipe = Pipe()
+            let outputPipe = Pipe()
+            let errorPipe = Pipe()
+            process.standardInput = inputPipe
+            process.standardOutput = outputPipe
+            process.standardError = errorPipe
 
-            let maxLen = MemoryLayout.size(ofValue: addr.sun_path)
-            let bytes = Array(path.utf8CString)
-            guard bytes.count <= maxLen else { return nil }
-            withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
-                let raw = UnsafeMutableRawPointer(ptr).assumingMemoryBound(to: CChar.self)
-                memset(raw, 0, maxLen)
-                for index in 0..<bytes.count {
-                    raw[index] = bytes[index]
-                }
+            do {
+                try process.run()
+            } catch {
+                return nil
             }
 
-            let pathOffset = MemoryLayout<sockaddr_un>.offset(of: \.sun_path) ?? 0
-            let addrLen = socklen_t(pathOffset + bytes.count)
-#if os(macOS)
-            addr.sun_len = UInt8(min(Int(addrLen), 255))
-#endif
-
-            let connected = withUnsafePointer(to: &addr) { ptr in
-                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                    connect(fd, sa, addrLen)
-                }
+            if let data = (line + "\n").data(using: .utf8) {
+                inputPipe.fileHandleForWriting.write(data)
             }
-            guard connected == 0 else { return nil }
+            inputPipe.fileHandleForWriting.closeFile()
+            process.waitUntilExit()
 
-            let payload = line + "\n"
-            let wrote: Bool = payload.withCString { cString in
-                var remaining = strlen(cString)
-                var pointer = UnsafeRawPointer(cString)
-                while remaining > 0 {
-                    let written = write(fd, pointer, remaining)
-                    if written <= 0 { return false }
-                    remaining -= written
-                    pointer = pointer.advanced(by: written)
-                }
-                return true
+            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            guard let output = String(data: outputData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !output.isEmpty else {
+                return nil
             }
-            guard wrote else { return nil }
-
-            let deadline = Date().addingTimeInterval(responseTimeout)
-            var buffer = [UInt8](repeating: 0, count: 4096)
-            var accumulator = ""
-            while Date() < deadline {
-                var pollDescriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-                let ready = poll(&pollDescriptor, 1, 100)
-                if ready < 0 {
-                    return nil
-                }
-                if ready == 0 {
-                    continue
-                }
-                let count = read(fd, &buffer, buffer.count)
-                if count <= 0 { break }
-                if let chunk = String(bytes: buffer[0..<count], encoding: .utf8) {
-                    accumulator.append(chunk)
-                    if let newline = accumulator.firstIndex(of: "\n") {
-                        return String(accumulator[..<newline])
-                    }
-                }
-            }
-
-            return accumulator.isEmpty ? nil : accumulator.trimmingCharacters(in: .whitespacesAndNewlines)
+            return output
         }
     }
 
