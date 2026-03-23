@@ -578,12 +578,16 @@ final class BrowserPaneNavigationKeybindUITests: XCTestCase {
             )
             return
         }
-        guard let fixture = installBrowserContentEditableFixture(
+        let installResult = installBrowserContentEditableFixture(
             surfaceId: surfaceId,
             secondaryClickOffsetX: secondaryClickOffsetX,
             secondaryClickOffsetY: secondaryClickOffsetY
-        ) else {
-            XCTFail("Expected contenteditable fixture installation to succeed")
+        )
+        guard let fixture = installResult.fixture else {
+            XCTFail(
+                "Expected contenteditable fixture installation to succeed. " +
+                "diagnostic=\(installResult.diagnostic)"
+            )
             return
         }
 
@@ -1486,7 +1490,18 @@ final class BrowserPaneNavigationKeybindUITests: XCTestCase {
         surfaceId: String,
         secondaryClickOffsetX: Double,
         secondaryClickOffsetY: Double
-    ) -> BrowserContentEditableFixture? {
+    ) -> BrowserContentEditableFixtureInstallResult {
+        let prereq = waitForBrowserContentEditableFixturePrerequisites(
+            surfaceId: surfaceId,
+            timeout: 8.0
+        )
+        guard prereq.ready else {
+            return BrowserContentEditableFixtureInstallResult(
+                fixture: nil,
+                diagnostic: "prerequisites_not_ready last=\(prereq.diagnostic)"
+            )
+        }
+
         let script = """
         (() => {
           const secondary = document.getElementById("cmux-ui-test-focus-input-secondary");
@@ -1572,8 +1587,14 @@ final class BrowserPaneNavigationKeybindUITests: XCTestCase {
         })();
         """
 
-        guard let payload = browserEvalDict(surfaceId: surfaceId, script: script),
-              (payload["ok"] as? Bool) == true,
+        guard let payload = browserEvalDict(surfaceId: surfaceId, script: script) else {
+            return BrowserContentEditableFixtureInstallResult(
+                fixture: nil,
+                diagnostic: "install_payload_nil prereq=\(prereq.diagnostic)"
+            )
+        }
+
+        guard (payload["ok"] as? Bool) == true,
               let editorId = payload["editorId"] as? String,
               !editorId.isEmpty,
               let activeId = payload["activeId"] as? String,
@@ -1582,14 +1603,52 @@ final class BrowserPaneNavigationKeybindUITests: XCTestCase {
               let secondaryCenterY = (payload["secondaryCenterY"] as? NSNumber)?.doubleValue,
               let editorCenterX = (payload["editorCenterX"] as? NSNumber)?.doubleValue,
               let editorCenterY = (payload["editorCenterY"] as? NSNumber)?.doubleValue else {
-            return nil
+            return BrowserContentEditableFixtureInstallResult(
+                fixture: nil,
+                diagnostic: "install_payload_incomplete payload=\(payload) prereq=\(prereq.diagnostic)"
+            )
         }
 
-        return BrowserContentEditableFixture(
-            editorId: editorId,
-            clickOffsetX: secondaryClickOffsetX + (editorCenterX - secondaryCenterX),
-            clickOffsetY: secondaryClickOffsetY + (editorCenterY - secondaryCenterY)
+        return BrowserContentEditableFixtureInstallResult(
+            fixture: BrowserContentEditableFixture(
+                editorId: editorId,
+                clickOffsetX: secondaryClickOffsetX + (editorCenterX - secondaryCenterX),
+                clickOffsetY: secondaryClickOffsetY + (editorCenterY - secondaryCenterY)
+            ),
+            diagnostic: "ok"
         )
+    }
+
+    private func waitForBrowserContentEditableFixturePrerequisites(
+        surfaceId: String,
+        timeout: TimeInterval
+    ) -> (ready: Bool, diagnostic: String) {
+        let script = """
+        (() => {
+          const active = document.activeElement;
+          return {
+            readyState: String(document.readyState || ""),
+            hasBody: !!document.body,
+            hasPrimary: !!document.getElementById("cmux-ui-test-focus-input"),
+            hasSecondary: !!document.getElementById("cmux-ui-test-focus-input-secondary"),
+            activeId: active && typeof active.id === "string" ? active.id : ""
+          };
+        })();
+        """
+
+        var lastDiagnostic = "nil"
+        let didMatch = waitForCondition(timeout: timeout) {
+            guard let payload = self.browserEvalDict(surfaceId: surfaceId, script: script) else {
+                lastDiagnostic = "nil"
+                return false
+            }
+            lastDiagnostic = String(describing: payload)
+            return (payload["readyState"] as? String) == "complete" &&
+                (payload["hasBody"] as? Bool) == true &&
+                (payload["hasPrimary"] as? Bool) == true &&
+                (payload["hasSecondary"] as? Bool) == true
+        }
+        return (ready: didMatch, diagnostic: lastDiagnostic)
     }
 
     private func waitForBrowserContentEditableSnapshot(
@@ -2143,6 +2202,11 @@ final class BrowserPaneNavigationKeybindUITests: XCTestCase {
         let editorId: String
         let clickOffsetX: Double
         let clickOffsetY: Double
+    }
+
+    private struct BrowserContentEditableFixtureInstallResult {
+        let fixture: BrowserContentEditableFixture?
+        let diagnostic: String
     }
 
     private struct BrowserContentEditableSnapshot {
