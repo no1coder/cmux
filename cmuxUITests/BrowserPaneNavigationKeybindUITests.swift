@@ -1638,8 +1638,9 @@ final class BrowserPaneNavigationKeybindUITests: XCTestCase {
 
         var lastDiagnostic = "nil"
         let didMatch = waitForCondition(timeout: timeout) {
-            guard let payload = self.browserEvalDict(surfaceId: surfaceId, script: script) else {
-                lastDiagnostic = "nil"
+            let outcome = self.browserEvalOutcome(surfaceId: surfaceId, script: script)
+            guard let payload = outcome.value as? [String: Any] else {
+                lastDiagnostic = outcome.diagnostic
                 return false
             }
             lastDiagnostic = String(describing: payload)
@@ -1707,10 +1708,14 @@ final class BrowserPaneNavigationKeybindUITests: XCTestCase {
     }
 
     private func browserEvalDict(surfaceId: String, script: String) -> [String: Any]? {
-        browserEvalValue(surfaceId: surfaceId, script: script) as? [String: Any]
+        browserEvalOutcome(surfaceId: surfaceId, script: script).value as? [String: Any]
     }
 
     private func browserEvalValue(surfaceId: String, script: String) -> Any? {
+        browserEvalOutcome(surfaceId: surfaceId, script: script).value
+    }
+
+    private func browserEvalOutcome(surfaceId: String, script: String) -> BrowserEvalOutcome {
         let client = ControlSocketClient(path: socketPath, responseTimeout: 10.0)
         let request: [String: Any] = [
             "id": UUID().uuidString,
@@ -1720,13 +1725,19 @@ final class BrowserPaneNavigationKeybindUITests: XCTestCase {
                 "script": script
             ]
         ]
-        guard let response = client.sendJSON(request),
-              let ok = response["ok"] as? Bool,
-              ok,
-              let result = response["result"] as? [String: Any] else {
-            return nil
+        guard let response = client.sendJSON(request) else {
+            return BrowserEvalOutcome(value: nil, diagnostic: "no_response")
         }
-        return result["value"]
+        guard let ok = response["ok"] as? Bool else {
+            return BrowserEvalOutcome(value: nil, diagnostic: "missing_ok response=\(response)")
+        }
+        guard ok else {
+            return BrowserEvalOutcome(value: nil, diagnostic: "not_ok response=\(response)")
+        }
+        guard let result = response["result"] as? [String: Any] else {
+            return BrowserEvalOutcome(value: nil, diagnostic: "missing_result response=\(response)")
+        }
+        return BrowserEvalOutcome(value: result["value"], diagnostic: "ok")
     }
 
     private func loadData() -> [String: String]? {
@@ -2206,6 +2217,11 @@ final class BrowserPaneNavigationKeybindUITests: XCTestCase {
 
     private struct BrowserContentEditableFixtureInstallResult {
         let fixture: BrowserContentEditableFixture?
+        let diagnostic: String
+    }
+
+    private struct BrowserEvalOutcome {
+        let value: Any?
         let diagnostic: String
     }
 
