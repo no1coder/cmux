@@ -2596,6 +2596,66 @@ final class BrowserDirectKeyDownRoutingTests: XCTestCase {
             )
         )
     }
+
+    func testNonCommandBrowserKeysGoStraightToKeyDown() {
+        let event = makeKeyDownEvent(
+            characters: String(UnicodeScalar(NSDownArrowFunctionKey)!),
+            modifiers: [],
+            keyCode: 125
+        )
+
+        XCTAssertEqual(browserDirectKeyRoutingStrategy(for: event), .keyDown)
+    }
+
+    func testCommandShiftArrowFallsBackToBrowserKeyDownWhenNoShortcutConsumesIt() {
+        let event = makeKeyDownEvent(
+            characters: String(UnicodeScalar(NSDownArrowFunctionKey)!),
+            modifiers: [.command, .shift],
+            keyCode: 125
+        )
+
+        XCTAssertEqual(
+            browserDirectKeyRoutingStrategy(for: event),
+            .menuOrAppShortcutThenKeyDown
+        )
+    }
+
+    func testCommandBacktickDefersToOriginalPerformKeyEquivalent() {
+        let event = makeKeyDownEvent(
+            characters: "`",
+            modifiers: [.command],
+            keyCode: 50
+        )
+
+        XCTAssertEqual(
+            browserDirectKeyRoutingStrategy(for: event),
+            .deferToOriginalPerformKeyEquivalent
+        )
+    }
+
+    private func makeKeyDownEvent(
+        characters: String,
+        modifiers: NSEvent.ModifierFlags,
+        keyCode: UInt16
+    ) -> NSEvent {
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: modifiers,
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: 0,
+            context: nil,
+            characters: characters,
+            charactersIgnoringModifiers: characters,
+            isARepeat: false,
+            keyCode: keyCode
+        ) else {
+            XCTFail("Failed to create keyDown event for routing strategy test")
+            fatalError("Failed to create keyDown event")
+        }
+
+        return event
+    }
 }
 
 final class BrowserZoomShortcutActionTests: XCTestCase {

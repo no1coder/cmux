@@ -1524,6 +1524,25 @@ func shouldDirectRouteBrowserFirstResponderKeyDown(
     return firstResponder != nil
 }
 
+enum BrowserDirectKeyRoutingStrategy: Equatable {
+    case keyDown
+    case menuOrAppShortcutThenKeyDown
+    case deferToOriginalPerformKeyEquivalent
+}
+
+func browserDirectKeyRoutingStrategy(for event: NSEvent) -> BrowserDirectKeyRoutingStrategy {
+    let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+    guard flags.contains(.command) else {
+        return .keyDown
+    }
+
+    guard shouldRouteCommandEquivalentDirectlyToMainMenu(event) else {
+        return .deferToOriginalPerformKeyEquivalent
+    }
+
+    return .menuOrAppShortcutThenKeyDown
+}
+
 func shouldToggleMainWindowFullScreenForCommandControlFShortcut(
     flags: NSEvent.ModifierFlags,
     chars: String,
@@ -12878,18 +12897,34 @@ private extension NSWindow {
             return false
         }
 
-        if browserRoute.webView.performKeyEquivalent(with: event) {
+        switch browserDirectKeyRoutingStrategy(for: event) {
+        case .deferToOriginalPerformKeyEquivalent:
+            return false
+
+        case .menuOrAppShortcutThenKeyDown:
+            if let mainMenu = NSApp.mainMenu,
+               mainMenu.performKeyEquivalent(with: event) {
 #if DEBUG
-            let targetType = String(describing: type(of: browserRoute.webView))
-            dlog("window.browserKeyDirect route=performKeyEquivalent target=\(targetType)")
+                dlog("window.browserKeyDirect route=mainMenu")
 #endif
-            return true
+                return true
+            }
+
+            if AppDelegate.shared?.handleBrowserSurfaceKeyEquivalent(event) == true {
+#if DEBUG
+                dlog("window.browserKeyDirect route=appShortcut")
+#endif
+                return true
+            }
+
+        case .keyDown:
+            break
         }
 
         if invokedFromPerformKeyEquivalent {
             if cmuxBrowserKeyDownForwardingDepth > 0 {
 #if DEBUG
-                dlog("window.browserKeyDirect route=performKeyEquivalentReentry")
+                dlog("window.browserKeyDirect route=keyDownReentry")
 #endif
                 return false
             }
