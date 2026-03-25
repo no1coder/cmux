@@ -3914,7 +3914,7 @@ extension BrowserPanel {
 
         _ = hideDeveloperTools()
         cancelDeveloperToolsRestoreRetry()
-        preferredDeveloperToolsVisible = false
+        setPreferredDeveloperToolsVisible(false)
         preferredDeveloperToolsPresentation = .unknown
         forceDeveloperToolsRefreshOnNextAttach = false
         developerToolsDetachedOpenGraceDeadline = nil
@@ -4180,6 +4180,11 @@ extension BrowserPanel {
         }
     }
 
+    private func setPreferredDeveloperToolsVisible(_ next: Bool) {
+        guard preferredDeveloperToolsVisible != next else { return }
+        preferredDeveloperToolsVisible = next
+    }
+
     private func syncDeveloperToolsPresentationPreferenceFromUI() {
         if !detachedDeveloperToolsWindows().isEmpty {
             setPreferredDeveloperToolsPresentation(.detached)
@@ -4208,7 +4213,7 @@ extension BrowserPanel {
                 guard self.preferredDeveloperToolsVisible else { return }
                 guard !self.isDeveloperToolsVisible() else { return }
                 self.developerToolsDetachedOpenGraceDeadline = nil
-                self.preferredDeveloperToolsVisible = false
+                self.setPreferredDeveloperToolsVisible(false)
                 self.cancelDeveloperToolsRestoreRetry()
 #if DEBUG
                 dlog(
@@ -4344,7 +4349,7 @@ extension BrowserPanel {
     ) -> Bool {
         if isDeveloperToolsTransitionInFlight {
             pendingDeveloperToolsTransitionTargetVisible = targetVisible
-            preferredDeveloperToolsVisible = targetVisible
+            setPreferredDeveloperToolsVisible(targetVisible)
             if !targetVisible {
                 developerToolsDetachedOpenGraceDeadline = nil
                 forceDeveloperToolsRefreshOnNextAttach = false
@@ -4371,7 +4376,7 @@ extension BrowserPanel {
 
         let isVisibleSelector = NSSelectorFromString("isVisible")
         let visible = inspector.cmuxCallBool(selector: isVisibleSelector) ?? false
-        preferredDeveloperToolsVisible = targetVisible
+        setPreferredDeveloperToolsVisible(targetVisible)
         developerToolsTransitionTargetVisible = targetVisible
 
         if targetVisible {
@@ -4473,7 +4478,7 @@ extension BrowserPanel {
         guard let visible = inspector.cmuxCallBool(selector: NSSelectorFromString("isVisible")) else { return }
         if isDeveloperToolsTransitionInFlight {
             let targetVisible = pendingDeveloperToolsTransitionTargetVisible ?? developerToolsTransitionTargetVisible ?? visible
-            preferredDeveloperToolsVisible = targetVisible
+            setPreferredDeveloperToolsVisible(targetVisible)
             if targetVisible, visible {
                 developerToolsDetachedOpenGraceDeadline = nil
                 syncDeveloperToolsPresentationPreferenceFromUI()
@@ -4488,7 +4493,7 @@ extension BrowserPanel {
         if visible {
             developerToolsDetachedOpenGraceDeadline = nil
             syncDeveloperToolsPresentationPreferenceFromUI()
-            preferredDeveloperToolsVisible = true
+            setPreferredDeveloperToolsVisible(true)
             developerToolsLastKnownVisibleAt = Date()
             cancelDeveloperToolsRestoreRetry()
             return
@@ -4496,7 +4501,7 @@ extension BrowserPanel {
         if preserveVisibleIntent && preferredDeveloperToolsVisible {
             return
         }
-        preferredDeveloperToolsVisible = false
+        setPreferredDeveloperToolsVisible(false)
         developerToolsLastKnownVisibleAt = nil
         cancelDeveloperToolsRestoreRetry()
     }
@@ -4551,7 +4556,7 @@ extension BrowserPanel {
             return false
         }
 
-        preferredDeveloperToolsVisible = false
+        setPreferredDeveloperToolsVisible(false)
         developerToolsDetachedOpenGraceDeadline = nil
         developerToolsLastKnownVisibleAt = nil
         forceDeveloperToolsRefreshOnNextAttach = false
@@ -4597,7 +4602,7 @@ extension BrowserPanel {
 
         let detachedOpenStillSettling = developerToolsDetachedOpenGraceDeadline.map { $0 > Date() } ?? false
         if preferredDeveloperToolsPresentation == .detached && !detachedOpenStillSettling {
-            preferredDeveloperToolsVisible = false
+            setPreferredDeveloperToolsVisible(false)
             developerToolsDetachedOpenGraceDeadline = nil
             cancelDeveloperToolsRestoreRetry()
 #if DEBUG
@@ -4624,7 +4629,7 @@ extension BrowserPanel {
         cmuxWithWindowFirstResponderBypass {
             _ = revealDeveloperTools(inspector)
         }
-        preferredDeveloperToolsVisible = true
+        setPreferredDeveloperToolsVisible(true)
         let visibleAfterShow = inspector.cmuxCallBool(selector: NSSelectorFromString("isVisible")) ?? false
         if visibleAfterShow {
             syncDeveloperToolsPresentationPreferenceFromUI()
