@@ -80,9 +80,11 @@ build_bridge() {
             ARCHS="$target_archs" \
             CEF_ROOT="$CEF_EXTRACT_DIR" \
             CEF_WRAPPER_LIB="$wrapper_lib"
+        link_framework
     else
         echo "==> Building CEF bridge (stub mode, no CEF framework)..."
         make -C "$CEF_BRIDGE_DIR" clean all ARCHS="$target_archs"
+        build_stub_framework "$target_archs"
     fi
 }
 
@@ -91,9 +93,49 @@ link_framework() {
     local fw_src="$CEF_EXTRACT_DIR/Release/Chromium Embedded Framework.framework"
     local fw_dst="$PROJECT_DIR/vendor/cef-bridge/Chromium Embedded Framework.framework"
     if [ -d "$fw_src" ]; then
+        rm -rf "$fw_dst"
         ln -sfn "$fw_src" "$fw_dst"
         echo "==> Linked CEF framework at $fw_dst"
     fi
+}
+
+build_stub_framework() {
+    local target_archs="${1:-arm64}"
+    local framework_dir="$CEF_BRIDGE_DIR/Chromium Embedded Framework.framework"
+    local framework_bin="$framework_dir/Chromium Embedded Framework"
+    local arch_flags=()
+
+    for arch in $target_archs; do
+        arch_flags+=("-arch" "$arch")
+    done
+
+    rm -rf "$framework_dir"
+    mkdir -p "$framework_dir"
+    printf 'void cmux_cef_framework_stub(void) {}\n' | \
+        clang -dynamiclib "${arch_flags[@]}" -mmacosx-version-min=13.0 \
+            -install_name "@rpath/Chromium Embedded Framework.framework/Chromium Embedded Framework" \
+            -x c - -o "$framework_bin"
+    cat > "$framework_dir/Info.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>Chromium Embedded Framework</string>
+    <key>CFBundleIdentifier</key>
+    <string>app.cmux.stub-cef-framework</string>
+    <key>CFBundleName</key>
+    <string>Chromium Embedded Framework</string>
+    <key>CFBundlePackageType</key>
+    <string>FMWK</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+</dict>
+</plist>
+EOF
+    echo "==> Built stub Chromium Embedded Framework at $framework_dir"
 }
 
 # Main
@@ -116,7 +158,6 @@ case "${1:-full}" in
         download_cef
         build_wrapper
         build_bridge
-        link_framework
         ;;
     *)
         echo "Usage: $0 [download|wrapper|bridge|stub|full]"

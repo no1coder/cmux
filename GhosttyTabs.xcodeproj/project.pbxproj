@@ -391,6 +391,7 @@
 			);
 			outputPaths = (
 				"$(SRCROOT)/vendor/cef-bridge/libcef_bridge.a",
+				"$(SRCROOT)/vendor/cef-bridge/Chromium Embedded Framework.framework/Chromium Embedded Framework",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
