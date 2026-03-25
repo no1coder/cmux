@@ -670,6 +670,17 @@ final class WindowTerminalPortal: NSObject {
                 self?.scheduleExternalGeometrySynchronize()
             }
         })
+        // Paper layout viewport scroll: re-sync portal positions when
+        // the viewport offset changes during animation.
+        geometryObservers.append(center.addObserver(
+            forName: PaperLayoutController.viewportDidScrollNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.synchronizeAllEntriesFromExternalGeometryChange()
+            }
+        })
     }
 
     private func removeGeometryObservers() {
