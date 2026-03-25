@@ -172,6 +172,46 @@ test "history plain includes prior scrollback lines" {
     try std.testing.expect(std.mem.indexOf(u8, history, "line3") != null);
 }
 
+test "fragmented utf8 feed preserves visible content" {
+    var session = try TerminalSession.init(std.testing.allocator, .{
+        .cols = 16,
+        .rows = 4,
+        .max_scrollback = 1024,
+    });
+    defer session.deinit();
+
+    const smile = "\xF0\x9F\x98\x80";
+    try session.feed("hi ");
+    try session.feed(smile[0..2]);
+    try session.feed(smile[2..]);
+    try session.feed("\r\n");
+
+    const snapshot = try session.snapshot(std.testing.allocator, .plain);
+    defer std.testing.allocator.free(snapshot);
+
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "hi ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, smile) != null);
+}
+
+test "fragmented ansi escape feed preserves visible content" {
+    var session = try TerminalSession.init(std.testing.allocator, .{
+        .cols = 16,
+        .rows = 4,
+        .max_scrollback = 1024,
+    });
+    defer session.deinit();
+
+    try session.feed("\x1b[31");
+    try session.feed("mred");
+    try session.feed("\x1b[0m\r\n");
+
+    const snapshot = try session.snapshot(std.testing.allocator, .plain);
+    defer std.testing.allocator.free(snapshot);
+
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "red") != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, snapshot, 0x1b) == null);
+}
+
 test "raw ring truncates and advances base offset" {
     var session = try TerminalSession.init(std.testing.allocator, .{
         .cols = 8,
@@ -192,6 +232,48 @@ test "raw ring truncates and advances base offset" {
 
     try std.testing.expect(read.truncated);
     try std.testing.expectEqual(session.base_offset, read.base_offset);
+}
+
+test "readRaw from midpoint returns exact bytes and offsets" {
+    var session = try TerminalSession.init(std.testing.allocator, .{
+        .cols = 16,
+        .rows = 4,
+        .max_scrollback = 1024,
+    });
+    defer session.deinit();
+
+    try session.feed("hello\nworld\n");
+
+    const read = try session.readRaw(std.testing.allocator, 6, 5);
+    defer std.testing.allocator.free(read.data);
+
+    try std.testing.expectEqualStrings("world", read.data);
+    try std.testing.expectEqual(@as(u64, 11), read.offset);
+    try std.testing.expectEqual(@as(u64, 0), read.base_offset);
+    try std.testing.expect(!read.truncated);
+}
+
+test "readRaw after truncation returns the retained prefix and updated offsets" {
+    var session = try TerminalSession.init(std.testing.allocator, .{
+        .cols = 16,
+        .rows = 4,
+        .max_scrollback = 1024,
+    });
+    defer session.deinit();
+
+    const chunk = "abcdefghijklmnopqrstuvwxyz012345";
+    var index: usize = 0;
+    while (index < max_raw_buffer_bytes + chunk.len) : (index += chunk.len) {
+        try session.feed(chunk);
+    }
+
+    const read = try session.readRaw(std.testing.allocator, 0, 32);
+    defer std.testing.allocator.free(read.data);
+
+    try std.testing.expect(read.truncated);
+    try std.testing.expectEqual(session.base_offset, read.base_offset);
+    try std.testing.expectEqualStrings(session.raw_buffer.items[0..32], read.data);
+    try std.testing.expectEqual(session.base_offset + 32, read.offset);
 }
 
 // Adapted from references/zmx/src/util.zig at commit

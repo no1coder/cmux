@@ -63,10 +63,41 @@ func daemonBinary(t *testing.T) string {
 
 func runJSONLFixture(t *testing.T, bin string, args ...string) []map[string]any {
 	t.Helper()
-	return runJSONLFixtureWithVars(t, bin, nil, args...)
+	result := runJSONLFixtureDetailed(t, bin, nil, 0, args...)
+	if result.TimedOut {
+		t.Fatalf("daemon did not exit after stdin closed\nstderr:\n%s", result.Stderr)
+	}
+	if result.ExitErr != nil {
+		t.Fatalf("daemon exited with error: %v\nstderr:\n%s", result.ExitErr, result.Stderr)
+	}
+	return result.Responses
 }
 
 func runJSONLFixtureWithVars(t *testing.T, bin string, initialVars map[string]string, args ...string) []map[string]any {
+	t.Helper()
+	result := runJSONLFixtureDetailed(t, bin, initialVars, 0, args...)
+	if result.TimedOut {
+		t.Fatalf("daemon did not exit after stdin closed\nstderr:\n%s", result.Stderr)
+	}
+	if result.ExitErr != nil {
+		t.Fatalf("daemon exited with error: %v\nstderr:\n%s", result.ExitErr, result.Stderr)
+	}
+	return result.Responses
+}
+
+type jsonlFixtureResult struct {
+	Responses []map[string]any
+	Stderr    string
+	ExitErr   error
+	TimedOut  bool
+}
+
+func runJSONLFixtureWithExitTimeout(t *testing.T, bin string, initialVars map[string]string, exitTimeout time.Duration, args ...string) jsonlFixtureResult {
+	t.Helper()
+	return runJSONLFixtureDetailed(t, bin, initialVars, exitTimeout, args...)
+}
+
+func runJSONLFixtureDetailed(t *testing.T, bin string, initialVars map[string]string, exitTimeout time.Duration, args ...string) jsonlFixtureResult {
 	t.Helper()
 
 	if len(args) == 0 {
@@ -122,17 +153,49 @@ func runJSONLFixtureWithVars(t *testing.T, bin string, initialVars map[string]st
 	if err := stdin.Close(); err != nil {
 		t.Fatalf("close stdin: %v", err)
 	}
-	if err := cmd.Wait(); err != nil {
-		t.Fatalf("daemon exited with error: %v\nstderr:\n%s", err, stderr.String())
+
+	if exitTimeout <= 0 {
+		return jsonlFixtureResult{
+			Responses: responses,
+			Stderr:    stderr.String(),
+			ExitErr:   cmd.Wait(),
+		}
 	}
 
-	return responses
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
+
+	select {
+	case err := <-waitCh:
+		return jsonlFixtureResult{
+			Responses: responses,
+			Stderr:    stderr.String(),
+			ExitErr:   err,
+		}
+	case <-time.After(exitTimeout):
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		<-waitCh
+		return jsonlFixtureResult{
+			Responses: responses,
+			Stderr:    stderr.String(),
+			TimedOut:  true,
+		}
+	}
 }
 
 func readFixtureLines(t *testing.T, fixturePath string) []string {
 	t.Helper()
 
-	data, err := os.ReadFile(filepath.Join(compatPackageDir(), fixturePath))
+	path := fixturePath
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(compatPackageDir(), fixturePath)
+	}
+
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read fixture %q: %v", fixturePath, err)
 	}

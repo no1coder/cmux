@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHelloFixtureAgainstBinary(t *testing.T) {
@@ -32,7 +33,14 @@ func TestTerminalEchoFixtureAgainstBinary(t *testing.T) {
 	t.Parallel()
 
 	bin := daemonBinary(t)
-	resp := runJSONLFixture(t, bin, "serve", "--stdio", "testdata/terminal_echo.jsonl")
+	run := runJSONLFixtureWithExitTimeout(t, bin, nil, 5*time.Second, "serve", "--stdio", "testdata/terminal_echo.jsonl")
+	if run.TimedOut {
+		t.Fatalf("stdio daemon hung after terminal echo fixture stdin closed\nstderr:\n%s", run.Stderr)
+	}
+	if run.ExitErr != nil {
+		t.Fatalf("stdio daemon exited with error after terminal echo fixture: %v\nstderr:\n%s", run.ExitErr, run.Stderr)
+	}
+	resp := run.Responses
 
 	if ok, _ := resp[0]["ok"].(bool); !ok {
 		t.Fatalf("terminal.open should succeed: %+v", resp[0])
@@ -43,8 +51,50 @@ func TestTerminalEchoFixtureAgainstBinary(t *testing.T) {
 	if ok, _ := resp[2]["ok"].(bool); !ok {
 		t.Fatalf("terminal.write should succeed: %+v", resp[2])
 	}
-	if got := decodeBase64Field(t, resp[3]["result"].(map[string]any), "data"); string(got) != "hello\r\n" {
-		t.Fatalf("echo data = %q, want %q", string(got), "hello\r\n")
+	if got := decodeBase64Field(t, resp[3]["result"].(map[string]any), "data"); string(got) != "hello\n" {
+		t.Fatalf("echo data = %q, want %q", string(got), "hello\n")
+	}
+}
+
+func TestTerminalOpenOnlyFixtureExitsOnEOF(t *testing.T) {
+	t.Parallel()
+
+	bin := daemonBinary(t)
+	fixture := writeCompatFixture(t,
+		`{"id":1,"method":"terminal.open","params":{"command":"printf READY; stty raw -echo -onlcr; exec cat","cols":120,"rows":40}}`,
+	)
+	run := runJSONLFixtureWithExitTimeout(t, bin, nil, 5*time.Second, "serve", "--stdio", fixture)
+	if run.TimedOut {
+		t.Fatalf("stdio daemon hung after terminal.open-only fixture stdin closed\nstderr:\n%s", run.Stderr)
+	}
+	if run.ExitErr != nil {
+		t.Fatalf("stdio daemon exited with error after terminal.open-only fixture: %v\nstderr:\n%s", run.ExitErr, run.Stderr)
+	}
+	if ok, _ := run.Responses[0]["ok"].(bool); !ok {
+		t.Fatalf("terminal.open should succeed: %+v", run.Responses[0])
+	}
+}
+
+func TestTerminalOpenReadFixtureExitsOnEOF(t *testing.T) {
+	t.Parallel()
+
+	bin := daemonBinary(t)
+	fixture := writeCompatFixture(t,
+		`{"id":1,"method":"terminal.open","params":{"command":"printf READY; stty raw -echo -onlcr; exec cat","cols":120,"rows":40}}`,
+		`{"id":2,"method":"terminal.read","params":{"session_id":"{{session_id}}","offset":0,"max_bytes":1024,"timeout_ms":1000}}`,
+	)
+	run := runJSONLFixtureWithExitTimeout(t, bin, nil, 5*time.Second, "serve", "--stdio", fixture)
+	if run.TimedOut {
+		t.Fatalf("stdio daemon hung after terminal.open + terminal.read fixture stdin closed\nstderr:\n%s", run.Stderr)
+	}
+	if run.ExitErr != nil {
+		t.Fatalf("stdio daemon exited with error after terminal.open + terminal.read fixture: %v\nstderr:\n%s", run.ExitErr, run.Stderr)
+	}
+	if ok, _ := run.Responses[0]["ok"].(bool); !ok {
+		t.Fatalf("terminal.open should succeed: %+v", run.Responses[0])
+	}
+	if ok, _ := run.Responses[1]["ok"].(bool); !ok {
+		t.Fatalf("terminal.read should succeed: %+v", run.Responses[1])
 	}
 }
 
@@ -133,6 +183,68 @@ func TestCLICompat(t *testing.T) {
 	}
 }
 
+func TestInvalidJSONRequestAgainstBinary(t *testing.T) {
+	t.Parallel()
+
+	bin := daemonBinary(t)
+	fixture := writeCompatFixture(t,
+		`not json at all`,
+		`{"id":1,"method":"ping","params":{}}`,
+	)
+	resp := runJSONLFixture(t, bin, "serve", "--stdio", fixture)
+
+	if ok, _ := resp[0]["ok"].(bool); ok {
+		t.Fatalf("invalid JSON request should fail: %+v", resp[0])
+	}
+	errObj := resp[0]["error"].(map[string]any)
+	if got := errObj["message"].(string); got != "invalid JSON request" {
+		t.Fatalf("invalid JSON error = %q, want %q", got, "invalid JSON request")
+	}
+	if ok, _ := resp[1]["ok"].(bool); !ok {
+		t.Fatalf("ping after invalid JSON should succeed: %+v", resp[1])
+	}
+}
+
+func TestUnknownMethodAgainstBinary(t *testing.T) {
+	t.Parallel()
+
+	bin := daemonBinary(t)
+	fixture := writeCompatFixture(t,
+		`{"id":1,"method":"definitely.unknown","params":{}}`,
+	)
+	resp := runJSONLFixture(t, bin, "serve", "--stdio", fixture)
+
+	if ok, _ := resp[0]["ok"].(bool); ok {
+		t.Fatalf("unknown method should fail: %+v", resp[0])
+	}
+	errObj := resp[0]["error"].(map[string]any)
+	if got := errObj["code"].(string); got != "method_not_found" {
+		t.Fatalf("unknown method code = %q, want %q", got, "method_not_found")
+	}
+}
+
+func TestTerminalWriteRejectsInvalidBase64AgainstBinary(t *testing.T) {
+	t.Parallel()
+
+	bin := daemonBinary(t)
+	fixture := writeCompatFixture(t,
+		`{"id":1,"method":"terminal.open","params":{"command":"cat","cols":80,"rows":24}}`,
+		`{"id":2,"method":"terminal.write","params":{"session_id":"{{session_id}}","data":"%%%not-base64%%%"}}`,
+	)
+	resp := runJSONLFixture(t, bin, "serve", "--stdio", fixture)
+
+	if ok, _ := resp[0]["ok"].(bool); !ok {
+		t.Fatalf("terminal.open should succeed: %+v", resp[0])
+	}
+	if ok, _ := resp[1]["ok"].(bool); ok {
+		t.Fatalf("terminal.write with invalid base64 should fail: %+v", resp[1])
+	}
+	errObj := resp[1]["error"].(map[string]any)
+	if got := errObj["message"].(string); got != "terminal.write data must be base64" {
+		t.Fatalf("terminal.write invalid base64 error = %q, want %q", got, "terminal.write data must be base64")
+	}
+}
+
 func decodeBase64Field(t *testing.T, payload map[string]any, key string) []byte {
 	t.Helper()
 
@@ -180,4 +292,15 @@ func startTCPEchoServer(t *testing.T) (net.Listener, int) {
 	}()
 
 	return listener, listener.Addr().(*net.TCPAddr).Port
+}
+
+func writeCompatFixture(t *testing.T, lines ...string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "fixture.jsonl")
+	content := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write compat fixture: %v", err)
+	}
+	return path
 }

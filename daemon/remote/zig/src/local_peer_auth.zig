@@ -32,3 +32,10 @@ fn authorizeWithPeerCred(fd: std.posix.fd_t) !void {
     if (c.getsockopt(fd, c.SOL_SOCKET, c.SO_PEERCRED, &cred, &len) != 0) return error.PeerAuthFailed;
     if (cred.uid != c.geteuid()) return error.UnauthorizedPeer;
 }
+
+test "skip peer auth env bypasses fd checks" {
+    try std.testing.expectEqual(@as(c_int, 0), c.setenv("CMUX_REMOTE_UNIX_SKIP_PEER_AUTH", "1", 1));
+    defer _ = c.unsetenv("CMUX_REMOTE_UNIX_SKIP_PEER_AUTH");
+
+    try authorizeClient(-1);
+}

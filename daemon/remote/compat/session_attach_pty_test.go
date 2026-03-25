@@ -113,7 +113,7 @@ func TestSessionAttachPropagatesPTYResize(t *testing.T) {
 	client := newUnixJSONRPCClient(t, socketPath)
 
 	open := client.Call(t, map[string]any{
-		"id": "1",
+		"id":     "1",
 		"method": "terminal.open",
 		"params": map[string]any{
 			"session_id": "resize-dev",
@@ -129,7 +129,7 @@ func TestSessionAttachPropagatesPTYResize(t *testing.T) {
 	attachmentID := result["attachment_id"].(string)
 
 	detach := client.Call(t, map[string]any{
-		"id": "2",
+		"id":     "2",
 		"method": "session.detach",
 		"params": map[string]any{
 			"session_id":    "resize-dev",
@@ -169,6 +169,189 @@ func TestSessionAttachPropagatesPTYResize(t *testing.T) {
 	}
 }
 
+func TestSessionAttachSmallestLiveClientWinsAcrossMultipleAttachments(t *testing.T) {
+	t.Parallel()
+
+	bin := daemonBinary(t)
+	socketPath := startUnixDaemon(t, bin)
+	client := newUnixJSONRPCClient(t, socketPath)
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Fatalf("close unix client: %v", err)
+		}
+	}()
+
+	open := client.Call(t, map[string]any{
+		"id":     "1",
+		"method": "terminal.open",
+		"params": map[string]any{
+			"session_id": "multi-live-size",
+			"command":    "cat",
+			"cols":       120,
+			"rows":       40,
+		},
+	})
+	if ok, _ := open["ok"].(bool); !ok {
+		t.Fatalf("terminal.open should succeed: %+v", open)
+	}
+
+	for i, attachment := range []struct {
+		id   string
+		cols int
+		rows int
+	}{
+		{id: "cli-small", cols: 90, rows: 24},
+		{id: "cli-large", cols: 160, rows: 50},
+	} {
+		resp := client.Call(t, map[string]any{
+			"id":     strconv.Itoa(i + 2),
+			"method": "session.attach",
+			"params": map[string]any{
+				"session_id":    "multi-live-size",
+				"attachment_id": attachment.id,
+				"cols":          attachment.cols,
+				"rows":          attachment.rows,
+			},
+		})
+		if ok, _ := resp["ok"].(bool); !ok {
+			t.Fatalf("session.attach %s should succeed: %+v", attachment.id, resp)
+		}
+	}
+
+	status := client.Call(t, map[string]any{
+		"id":     "4",
+		"method": "session.status",
+		"params": map[string]any{
+			"session_id": "multi-live-size",
+		},
+	})
+	if ok, _ := status["ok"].(bool); !ok {
+		t.Fatalf("session.status should succeed: %+v", status)
+	}
+	result := status["result"].(map[string]any)
+	if got := int(result["effective_cols"].(float64)); got != 90 {
+		t.Fatalf("effective_cols = %d, want 90 with smaller live client attached: %+v", got, status)
+	}
+	if got := int(result["effective_rows"].(float64)); got != 24 {
+		t.Fatalf("effective_rows = %d, want 24 with smaller live client attached: %+v", got, status)
+	}
+	if got := len(result["attachments"].([]any)); got != 3 {
+		t.Fatalf("attachments = %d, want 3 live clients: %+v", got, status)
+	}
+}
+
+func TestSessionAttachDetachingSmallestClientLetsSessionGrow(t *testing.T) {
+	t.Parallel()
+
+	bin := daemonBinary(t)
+	socketPath := startUnixDaemon(t, bin)
+	client := newUnixJSONRPCClient(t, socketPath)
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Fatalf("close unix client: %v", err)
+		}
+	}()
+
+	open := client.Call(t, map[string]any{
+		"id":     "1",
+		"method": "terminal.open",
+		"params": map[string]any{
+			"session_id": "multi-grow-size",
+			"command":    "cat",
+			"cols":       120,
+			"rows":       40,
+		},
+	})
+	if ok, _ := open["ok"].(bool); !ok {
+		t.Fatalf("terminal.open should succeed: %+v", open)
+	}
+	openResult := open["result"].(map[string]any)
+	openAttachmentID := openResult["attachment_id"].(string)
+
+	for i, attachment := range []struct {
+		id   string
+		cols int
+		rows int
+	}{
+		{id: "cli-small", cols: 90, rows: 24},
+		{id: "cli-large", cols: 160, rows: 50},
+	} {
+		resp := client.Call(t, map[string]any{
+			"id":     strconv.Itoa(i + 2),
+			"method": "session.attach",
+			"params": map[string]any{
+				"session_id":    "multi-grow-size",
+				"attachment_id": attachment.id,
+				"cols":          attachment.cols,
+				"rows":          attachment.rows,
+			},
+		})
+		if ok, _ := resp["ok"].(bool); !ok {
+			t.Fatalf("session.attach %s should succeed: %+v", attachment.id, resp)
+		}
+	}
+
+	detachSmall := client.Call(t, map[string]any{
+		"id":     "4",
+		"method": "session.detach",
+		"params": map[string]any{
+			"session_id":    "multi-grow-size",
+			"attachment_id": "cli-small",
+		},
+	})
+	if ok, _ := detachSmall["ok"].(bool); !ok {
+		t.Fatalf("session.detach cli-small should succeed: %+v", detachSmall)
+	}
+
+	statusAfterSmall := client.Call(t, map[string]any{
+		"id":     "5",
+		"method": "session.status",
+		"params": map[string]any{
+			"session_id": "multi-grow-size",
+		},
+	})
+	if ok, _ := statusAfterSmall["ok"].(bool); !ok {
+		t.Fatalf("session.status after cli-small detach should succeed: %+v", statusAfterSmall)
+	}
+	resultAfterSmall := statusAfterSmall["result"].(map[string]any)
+	if got := int(resultAfterSmall["effective_cols"].(float64)); got != 120 {
+		t.Fatalf("effective_cols = %d, want 120 after smallest detach: %+v", got, statusAfterSmall)
+	}
+	if got := int(resultAfterSmall["effective_rows"].(float64)); got != 40 {
+		t.Fatalf("effective_rows = %d, want 40 after smallest detach: %+v", got, statusAfterSmall)
+	}
+
+	detachOpen := client.Call(t, map[string]any{
+		"id":     "6",
+		"method": "session.detach",
+		"params": map[string]any{
+			"session_id":    "multi-grow-size",
+			"attachment_id": openAttachmentID,
+		},
+	})
+	if ok, _ := detachOpen["ok"].(bool); !ok {
+		t.Fatalf("session.detach %s should succeed: %+v", openAttachmentID, detachOpen)
+	}
+
+	statusAfterOpen := client.Call(t, map[string]any{
+		"id":     "7",
+		"method": "session.status",
+		"params": map[string]any{
+			"session_id": "multi-grow-size",
+		},
+	})
+	if ok, _ := statusAfterOpen["ok"].(bool); !ok {
+		t.Fatalf("session.status after open attachment detach should succeed: %+v", statusAfterOpen)
+	}
+	resultAfterOpen := statusAfterOpen["result"].(map[string]any)
+	if got := int(resultAfterOpen["effective_cols"].(float64)); got != 160 {
+		t.Fatalf("effective_cols = %d, want 160 after only large client remains: %+v", got, statusAfterOpen)
+	}
+	if got := int(resultAfterOpen["effective_rows"].(float64)); got != 50 {
+		t.Fatalf("effective_rows = %d, want 50 after only large client remains: %+v", got, statusAfterOpen)
+	}
+}
+
 func TestSessionAttachResizeDeliversSigwinch(t *testing.T) {
 	t.Parallel()
 
@@ -187,7 +370,7 @@ func TestSessionAttachResizeDeliversSigwinch(t *testing.T) {
 	}()
 
 	open := client.Call(t, map[string]any{
-		"id": "1",
+		"id":     "1",
 		"method": "terminal.open",
 		"params": map[string]any{
 			"session_id": "resize-sigwinch",
@@ -208,7 +391,7 @@ func TestSessionAttachResizeDeliversSigwinch(t *testing.T) {
 	}
 
 	resize := client.Call(t, map[string]any{
-		"id": "2",
+		"id":     "2",
 		"method": "session.resize",
 		"params": map[string]any{
 			"session_id":    "resize-sigwinch",
@@ -235,7 +418,7 @@ func TestSessionAttachDetachesCleanlyWithExistingAttachment(t *testing.T) {
 
 	client := newUnixJSONRPCClient(t, socketPath)
 	open := client.Call(t, map[string]any{
-		"id": "1",
+		"id":     "1",
 		"method": "terminal.open",
 		"params": map[string]any{
 			"session_id": "multi-attach-dev",
@@ -328,7 +511,7 @@ func waitForTerminalReadContains(t *testing.T, client *unixJSONRPCClient, sessio
 	currentOffset := offset
 	for time.Now().Before(deadline) {
 		read := client.Call(t, map[string]any{
-			"id": "read",
+			"id":     "read",
 			"method": "terminal.read",
 			"params": map[string]any{
 				"session_id": sessionID,

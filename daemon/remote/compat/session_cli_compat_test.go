@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -122,6 +123,46 @@ func TestSessionCLITopLevelListUsesEnvSocket(t *testing.T) {
 	}
 }
 
+func TestSessionCLITopLevelStatusUsesEnvSocket(t *testing.T) {
+	t.Parallel()
+
+	bin := daemonBinary(t)
+	socketPath := startUnixDaemon(t, bin)
+
+	openAndSeedCatSession(t, socketPath, "status-env-dev", "")
+
+	statusCmd := exec.Command(bin, "status", "status-env-dev")
+	statusCmd.Dir = daemonRemoteRoot()
+	statusCmd.Env = append(os.Environ(), "CMUXD_UNIX_PATH="+socketPath)
+	statusOutput, err := statusCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("top-level status with env socket failed: %v\n%s", err, statusOutput)
+	}
+	if strings.TrimSpace(string(statusOutput)) != "status-env-dev 80x24" {
+		t.Fatalf("top-level status with env socket output = %q, want %q", strings.TrimSpace(string(statusOutput)), "status-env-dev 80x24")
+	}
+}
+
+func TestSessionCLITopLevelHistoryUsesEnvSocket(t *testing.T) {
+	t.Parallel()
+
+	bin := daemonBinary(t)
+	socketPath := startUnixDaemon(t, bin)
+
+	openAndSeedCatSession(t, socketPath, "history-env-dev", "hello\n")
+
+	historyCmd := exec.Command(bin, "history", "history-env-dev")
+	historyCmd.Dir = daemonRemoteRoot()
+	historyCmd.Env = append(os.Environ(), "CMUXD_UNIX_PATH="+socketPath)
+	historyOutput, err := historyCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("top-level history with env socket failed: %v\n%s", err, historyOutput)
+	}
+	if !strings.Contains(string(historyOutput), "hello") {
+		t.Fatalf("top-level history with env socket missing hello: %s", historyOutput)
+	}
+}
+
 func TestSessionCLINewQuietDetachedSuppressesSessionID(t *testing.T) {
 	t.Parallel()
 
@@ -182,7 +223,7 @@ func TestSessionCLINewDropsBootstrapAttachmentAfterAttach(t *testing.T) {
 	}
 
 	status := client.Call(t, map[string]any{
-		"id": "1",
+		"id":     "1",
 		"method": "session.status",
 		"params": map[string]any{
 			"session_id": "grow-dev",
@@ -210,6 +251,77 @@ func TestSessionCLINewDropsBootstrapAttachmentAfterAttach(t *testing.T) {
 	waitForCommandExit(t, cmd, 5*time.Second)
 }
 
+func TestSessionCLIListShowsMultipleAttachments(t *testing.T) {
+	t.Parallel()
+
+	bin := daemonBinary(t)
+	socketPath := startUnixDaemon(t, bin)
+	client := newUnixJSONRPCClient(t, socketPath)
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Fatalf("close unix client: %v", err)
+		}
+	}()
+
+	open := client.Call(t, map[string]any{
+		"id":     "1",
+		"method": "terminal.open",
+		"params": map[string]any{
+			"session_id": "tree-dev",
+			"command":    "cat",
+			"cols":       120,
+			"rows":       40,
+		},
+	})
+	if ok, _ := open["ok"].(bool); !ok {
+		t.Fatalf("terminal.open should succeed: %+v", open)
+	}
+
+	for i, attachment := range []struct {
+		id   string
+		cols int
+		rows int
+	}{
+		{id: "cli-small", cols: 90, rows: 24},
+		{id: "cli-large", cols: 160, rows: 50},
+	} {
+		resp := client.Call(t, map[string]any{
+			"id":     strconv.Itoa(i + 2),
+			"method": "session.attach",
+			"params": map[string]any{
+				"session_id":    "tree-dev",
+				"attachment_id": attachment.id,
+				"cols":          attachment.cols,
+				"rows":          attachment.rows,
+			},
+		})
+		if ok, _ := resp["ok"].(bool); !ok {
+			t.Fatalf("session.attach %s should succeed: %+v", attachment.id, resp)
+		}
+	}
+
+	listCmd := exec.Command(bin, "list", "--socket", socketPath)
+	listCmd.Dir = daemonRemoteRoot()
+	listOutput, err := listCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("top-level list failed: %v\n%s", err, listOutput)
+	}
+
+	listText := string(listOutput)
+	if !strings.Contains(listText, "session tree-dev 90x24 attachments=3") {
+		t.Fatalf("list missing tree-dev summary: %s", listOutput)
+	}
+	for _, want := range []string{
+		"att-1 120x40",
+		"cli-large 160x50",
+		"cli-small 90x24",
+	} {
+		if !strings.Contains(listText, want) {
+			t.Fatalf("list missing attachment detail %q: %s", want, listOutput)
+		}
+	}
+}
+
 func openAndSeedCatSession(t *testing.T, socketPath, sessionID, text string) {
 	t.Helper()
 
@@ -221,7 +333,7 @@ func openAndSeedCatSession(t *testing.T, socketPath, sessionID, text string) {
 	}()
 
 	open := client.Call(t, map[string]any{
-		"id": "1",
+		"id":     "1",
 		"method": "terminal.open",
 		"params": map[string]any{
 			"session_id": sessionID,
@@ -239,7 +351,7 @@ func openAndSeedCatSession(t *testing.T, socketPath, sessionID, text string) {
 	}
 
 	write := client.Call(t, map[string]any{
-		"id": "2",
+		"id":     "2",
 		"method": "terminal.write",
 		"params": map[string]any{
 			"session_id": sessionID,
@@ -251,7 +363,7 @@ func openAndSeedCatSession(t *testing.T, socketPath, sessionID, text string) {
 	}
 
 	_ = client.Call(t, map[string]any{
-		"id": "3",
+		"id":     "3",
 		"method": "terminal.read",
 		"params": map[string]any{
 			"session_id": sessionID,
