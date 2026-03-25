@@ -955,13 +955,7 @@ final class WindowTerminalPortal: NSObject {
             hostBounds.origin.y.isFinite &&
             hostBounds.size.width.isFinite &&
             hostBounds.size.height.isFinite
-        if hasFiniteHostBounds {
-            let clampedFrame = frameInHost.intersection(hostBounds)
-            if !clampedFrame.isNull, clampedFrame.width > 1, clampedFrame.height > 1 {
-                return clampedFrame
-            }
-        }
-
+        // Paper layout: return unclamped frame. The host clips visually.
         return frameInHost
     }
 
