@@ -10899,6 +10899,8 @@ enum SidebarTrailingAccessoryWidthPolicy {
 // Do NOT add @EnvironmentObject or new @Binding without updating ==.
 // Do NOT remove .equatable() from the ForEach call site in VerticalTabsSidebar.
 private struct TabItemView: View, Equatable {
+    private static let workspaceObservationCoalesceInterval: RunLoop.SchedulerTimeType.Stride = .milliseconds(40)
+
     // Closures, Bindings, and object references are excluded from ==
     // because they're recreated every parent eval but don't affect rendering.
     nonisolated static func == (lhs: TabItemView, rhs: TabItemView) -> Bool {
@@ -11489,7 +11491,14 @@ private struct TabItemView: View, Equatable {
                     .offset(y: index == 0 ? 0 : -(rowSpacing / 2))
             }
         }
-        .onReceive(tab.objectWillChange.receive(on: RunLoop.main)) { _ in
+        .onReceive(
+            tab.objectWillChange
+                .receive(on: RunLoop.main)
+                // Prompt-time sidebar telemetry can arrive as a short burst
+                // (pwd, branch, PR, shell state). Coalesce that burst so the
+                // row redraws once with the settled state instead of blinking.
+                .debounce(for: Self.workspaceObservationCoalesceInterval, scheduler: RunLoop.main)
+        ) { _ in
             workspaceObservationGeneration &+= 1
         }
         .onDrag {
