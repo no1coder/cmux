@@ -17,6 +17,7 @@ class UpdateDriver: NSObject, SPUUserDriver {
     private var lastFeedURLString: String?
     private var pendingUserInitiatedCheckPresentation: UpdateUserInitiatedCheckPresentation?
     private var activeUserInitiatedCheckPresentation: UpdateUserInitiatedCheckPresentation?
+    var confirmUpdateRelaunchIfNeededHandler: (() -> Bool)?
 
     init(viewModel: UpdateViewModel, hostBundle: Bundle) {
         self.viewModel = viewModel
@@ -464,7 +465,13 @@ class UpdateDriver: NSObject, SPUUserDriver {
         }
     }
 
-    private func makeGuardedUpdateRelaunchAction(
+    func makeGuardedUpdateInstallChoiceReply(
+        _ reply: @escaping @Sendable (SPUUserUpdateChoice) -> Void
+    ) -> @Sendable (SPUUserUpdateChoice) -> Void {
+        reply
+    }
+
+    func makeGuardedUpdateRelaunchAction(
         applicationTerminated: Bool,
         action: @escaping () -> Void
     ) -> () -> Void {

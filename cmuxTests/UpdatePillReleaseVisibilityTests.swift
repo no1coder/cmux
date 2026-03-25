@@ -1,6 +1,7 @@
 import XCTest
 import Foundation
 import AppKit
+import Sparkle
 
 #if canImport(cmux_DEV)
 @testable import cmux_DEV
@@ -190,5 +191,135 @@ final class TitlebarControlsHoverPolicyTests: XCTestCase {
         XCTAssertFalse(titlebarControlsShouldTrackButtonHover(config: TitlebarControlsStyle.roomy.config))
         XCTAssertTrue(titlebarControlsShouldTrackButtonHover(config: TitlebarControlsStyle.pillGroup.config))
         XCTAssertFalse(titlebarControlsShouldTrackButtonHover(config: TitlebarControlsStyle.softButtons.config))
+    }
+}
+
+@MainActor
+final class UpdateRelaunchGuardTests: XCTestCase {
+    func testGuardedInstallChoiceAllowsInstallWhenConfirmed() async {
+        let driver = makeDriver {
+            true
+        }
+        let replyExpectation = expectation(description: "reply invoked")
+        var receivedChoice: SPUUserUpdateChoice?
+
+        let guardedReply = driver.makeGuardedUpdateInstallChoiceReply { choice in
+            receivedChoice = choice
+            replyExpectation.fulfill()
+        }
+
+        guardedReply(.install)
+
+        await fulfillment(of: [replyExpectation], timeout: 1.0)
+        assertChoice(receivedChoice, equals: .install)
+    }
+
+    func testGuardedInstallChoiceDismissesWhenConfirmationDeclined() async {
+        let driver = makeDriver {
+            false
+        }
+        let replyExpectation = expectation(description: "reply invoked")
+        var receivedChoice: SPUUserUpdateChoice?
+
+        let guardedReply = driver.makeGuardedUpdateInstallChoiceReply { choice in
+            receivedChoice = choice
+            replyExpectation.fulfill()
+        }
+
+        guardedReply(.install)
+
+        await fulfillment(of: [replyExpectation], timeout: 1.0)
+        assertChoice(receivedChoice, equals: .dismiss)
+    }
+
+    func testGuardedRelaunchActionRunsWhenConfirmed() async {
+        var confirmationCallCount = 0
+        let driver = makeDriver {
+            confirmationCallCount += 1
+            return true
+        }
+        let actionExpectation = expectation(description: "relaunch action invoked")
+
+        let guardedAction = driver.makeGuardedUpdateRelaunchAction(applicationTerminated: false) {
+            actionExpectation.fulfill()
+        }
+
+        guardedAction()
+
+        await fulfillment(of: [actionExpectation], timeout: 1.0)
+        XCTAssertEqual(confirmationCallCount, 1)
+    }
+
+    func testGuardedRelaunchActionSkipsActionWhenConfirmationDeclined() async {
+        var confirmationCallCount = 0
+        let driver = makeDriver {
+            confirmationCallCount += 1
+            return false
+        }
+        let actionExpectation = expectation(description: "relaunch action invoked")
+        actionExpectation.isInverted = true
+
+        let guardedAction = driver.makeGuardedUpdateRelaunchAction(applicationTerminated: false) {
+            actionExpectation.fulfill()
+        }
+
+        guardedAction()
+
+        await fulfillment(of: [actionExpectation], timeout: 0.3)
+        XCTAssertEqual(confirmationCallCount, 1)
+    }
+
+    func testShowReadyDismissClearsActiveUserInitiatedPresentation() async {
+        let driver = makeDriver {
+            false
+        }
+        driver.prepareForUserInitiatedCheck(presentation: .custom)
+        driver.showUserInitiatedUpdateCheck(cancellation: {})
+        XCTAssertEqual(activePresentation(on: driver), .custom)
+
+        let replyExpectation = expectation(description: "reply invoked")
+        var receivedChoice: SPUUserUpdateChoice?
+
+        driver.showReady { choice in
+            receivedChoice = choice
+            replyExpectation.fulfill()
+        }
+
+        await fulfillment(of: [replyExpectation], timeout: 1.0)
+        assertChoice(receivedChoice, equals: .dismiss)
+        XCTAssertNil(activePresentation(on: driver))
+    }
+
+    private func makeDriver(confirm: @escaping () -> Bool) -> UpdateDriver {
+        let driver = UpdateDriver(
+            viewModel: UpdateViewModel(),
+            hostBundle: Bundle(for: UpdateRelaunchGuardTests.self)
+        )
+        driver.confirmUpdateRelaunchIfNeededHandler = confirm
+        return driver
+    }
+
+    private func activePresentation(on driver: UpdateDriver) -> UpdateUserInitiatedCheckPresentation? {
+        Mirror(reflecting: driver)
+            .children
+            .first { $0.label == "activeUserInitiatedCheckPresentation" }
+            .flatMap { child in
+                let optionalMirror = Mirror(reflecting: child.value)
+                return optionalMirror.children.first?.value as? UpdateUserInitiatedCheckPresentation
+            }
+    }
+
+    private func assertChoice(_ actual: SPUUserUpdateChoice?, equals expected: SPUUserUpdateChoice) {
+        guard let actual else {
+            XCTFail("Expected update choice \(expected) but reply was never captured")
+            return
+        }
+
+        switch (actual, expected) {
+        case (.install, .install), (.dismiss, .dismiss), (.skip, .skip):
+            break
+        default:
+            XCTFail("Expected update choice \(expected), got \(actual)")
+        }
     }
 }
