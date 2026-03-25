@@ -115,9 +115,7 @@ struct PaperTabBarView: View {
     private var splitButtons: some View {
         HStack(spacing: 4) {
             Button {
-                if let paneId = controller.focusedPaneId {
-                    controller.requestNewTab(kind: "terminal", inPane: paneId)
-                }
+                controller.requestNewTab(kind: "terminal", inPane: pane.id)
             } label: {
                 Image(systemName: "terminal")
                     .font(.system(size: 12))

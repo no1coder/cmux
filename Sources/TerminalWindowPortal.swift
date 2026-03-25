@@ -929,12 +929,9 @@ final class WindowTerminalPortal: NSObject {
     /// visible rect that should drive portal geometry.
     private func effectiveAnchorFrameInWindow(for anchorView: NSView) -> NSRect {
         let frameInWindow = anchorView.convert(anchorView.bounds, to: nil)
-        // Clamp X position to visible ancestor bounds (prevents rendering
-        // over sidebar), but preserve the original width/height so terminal
-        // dimensions stay stable during viewport scrolling.
-        var clampedX = frameInWindow.origin.x
-        let originalWidth = frameInWindow.size.width
-        let originalHeight = frameInWindow.size.height
+        // Clamp the frame to the visible ancestor bounds so terminals don't
+        // render over the sidebar or extend past the viewport right edge.
+        var visibleRect = frameInWindow
         var current = anchorView.superview
         while let ancestor = current {
             let ancestorBoundsInWindow = ancestor.convert(ancestor.bounds, to: nil)
@@ -944,17 +941,13 @@ final class WindowTerminalPortal: NSObject {
                 ancestorBoundsInWindow.size.width.isFinite &&
                 ancestorBoundsInWindow.size.height.isFinite
             if finiteAncestorBounds {
-                clampedX = max(clampedX, ancestorBoundsInWindow.origin.x)
+                visibleRect = visibleRect.intersection(ancestorBoundsInWindow)
+                if visibleRect.isNull { return .zero }
             }
             if ancestor === installedReferenceView { break }
             current = ancestor.superview
         }
-        return NSRect(
-            x: clampedX,
-            y: frameInWindow.origin.y,
-            width: originalWidth,
-            height: originalHeight
-        )
+        return visibleRect
     }
 
     private func seededFrameInHost(for anchorView: NSView) -> NSRect? {
@@ -1472,20 +1465,25 @@ final class WindowTerminalPortal: NSObject {
         }
 
         if hasFiniteFrame {
-            let expectedBounds = NSRect(origin: .zero, size: targetFrame.size)
-            var geometryChanged = false
+            let sizeChanged = abs(oldFrame.width - targetFrame.width) > 1 ||
+                              abs(oldFrame.height - targetFrame.height) > 1
+            let positionChanged = !Self.rectApproximatelyEqual(oldFrame, targetFrame)
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            if !Self.rectApproximatelyEqual(oldFrame, targetFrame) {
+            if positionChanged {
                 hostedView.frame = targetFrame
-                geometryChanged = true
             }
-            if !Self.rectApproximatelyEqual(hostedView.bounds, expectedBounds) {
-                hostedView.bounds = expectedBounds
-                geometryChanged = true
+            if sizeChanged {
+                // Only update bounds (which drives terminal resize) when the
+                // actual pane size changed, not during viewport scrolling
+                // where only the visible clip region changes.
+                let expectedBounds = NSRect(origin: .zero, size: targetFrame.size)
+                if !Self.rectApproximatelyEqual(hostedView.bounds, expectedBounds) {
+                    hostedView.bounds = expectedBounds
+                }
             }
             CATransaction.commit()
-            if geometryChanged {
+            if sizeChanged {
                 hostedView.reconcileGeometryNow()
                 hostedView.refreshSurfaceNow(reason: "portal.frameChange")
             }
