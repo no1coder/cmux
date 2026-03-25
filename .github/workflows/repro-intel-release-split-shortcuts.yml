@@ -1,16 +1,14 @@
 name: Repro Intel release split shortcuts
 
 on:
-  pull_request:
-    paths:
-      - .github/workflows/repro-intel-release-split-shortcuts.yml
-      - scripts/repro-intel-release-split-shortcuts.sh
+  schedule:
+    - cron: '17 09 * * *'
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Release tag to test
+        description: Release tag to test, for example nightly or v0.62.2
         required: false
-        default: v0.62.2
+        default: nightly
       runner:
         description: Intel runner to use
         required: false
@@ -30,12 +28,13 @@ on:
 
 jobs:
   repro:
-    name: ${{ github.event_name == 'pull_request' && 'macos-15-intel cmd-d' || format('{0} {1}', inputs.runner, inputs.shortcut) }}
-    runs-on: ${{ github.event_name == 'pull_request' && 'macos-15-intel' || inputs.runner }}
+    name: ${{ format('{0} {1} {2}', github.event_name == 'schedule' && 'macos-15-intel' || inputs.runner || 'macos-15-intel', github.event_name == 'schedule' && 'cmd-d' || inputs.shortcut || 'cmd-d', github.event_name == 'schedule' && 'nightly' || inputs.release_tag || 'nightly') }}
+    runs-on: ${{ github.event_name == 'schedule' && 'macos-15-intel' || inputs.runner || 'macos-15-intel' }}
     timeout-minutes: 20
     env:
-      REPRO_RUNNER: ${{ github.event_name == 'pull_request' && 'macos-15-intel' || inputs.runner }}
-      REPRO_SHORTCUT: ${{ github.event_name == 'pull_request' && 'cmd-d' || inputs.shortcut }}
+      REPRO_RUNNER: ${{ github.event_name == 'schedule' && 'macos-15-intel' || inputs.runner || 'macos-15-intel' }}
+      REPRO_SHORTCUT: ${{ github.event_name == 'schedule' && 'cmd-d' || inputs.shortcut || 'cmd-d' }}
+      REPRO_RELEASE_TAG: ${{ github.event_name == 'schedule' && 'nightly' || inputs.release_tag || 'nightly' }}
 
     steps:
       - name: Checkout
@@ -70,7 +69,7 @@ jobs:
 
       - name: Reproduce release split failure
         env:
-          CMUX_RELEASE_TAG: ${{ inputs.release_tag || 'v0.62.2' }}
+          CMUX_RELEASE_TAG: ${{ env.REPRO_RELEASE_TAG }}
           CMUX_REPRO_SHORTCUT: ${{ env.REPRO_SHORTCUT }}
           CMUX_REPRO_DIR: ${{ runner.temp }}/cmux-intel-release-repro-${{ env.REPRO_RUNNER }}-${{ env.REPRO_SHORTCUT }}
         run: scripts/repro-intel-release-split-shortcuts.sh
