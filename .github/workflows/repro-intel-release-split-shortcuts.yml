@@ -1,6 +1,10 @@
 name: Repro Intel release split shortcuts
 
 on:
+  pull_request:
+    paths:
+      - .github/workflows/repro-intel-release-split-shortcuts.yml
+      - scripts/repro-intel-release-split-shortcuts.sh
   workflow_dispatch:
     inputs:
       release_tag:
