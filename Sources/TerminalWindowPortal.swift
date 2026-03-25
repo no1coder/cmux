@@ -1461,38 +1461,40 @@ final class WindowTerminalPortal: NSObject {
         }
 
         if hasFiniteFrame {
-            // Hybrid frame: use the clamped X from ancestor intersection
-            // (prevents sidebar overlap) but the unclamped width/height
-            // (prevents terminal resize during viewport scrolling).
-            // Use the full unclamped frame for position AND size.
-            // The host view's masksToBounds clips visually at all edges
-            // (left/sidebar boundary and right/viewport edge). This keeps
-            // both terminal dimensions and position tracking stable.
-            let stableFrame = unclampedFrameInHost
-            if entry.visibleInUI && !shouldHide {
-                let anchorInWin = anchorView.convert(anchorView.bounds, to: nil)
-                dlog(
-                    "portal.pos anchor=\(Int(anchorInWin.origin.x))x\(Int(anchorInWin.width)) " +
-                    "stable=\(Int(stableFrame.origin.x))x\(Int(stableFrame.width)) " +
-                    "host=\(Int(hostBounds.width))"
-                )
-            }
-            let sizeChanged = abs(oldFrame.width - stableFrame.width) > 1 ||
-                              abs(oldFrame.height - stableFrame.height) > 1
-            let positionChanged = abs(oldFrame.origin.x - stableFrame.origin.x) > 0.5 ||
-                                  abs(oldFrame.origin.y - stableFrame.origin.y) > 0.5
+            // The terminal's BOUNDS stay at the full pane size (stable PTY
+            // columns). The FRAME is clipped to the visible area (sidebar
+            // to viewport right edge) using the clamped targetFrame. The
+            // bounds origin is offset so the visible content within the
+            // frame aligns with the pane's scroll position.
+            let fullSize = unclampedFrameInHost.size
+            let clippedFrame = targetFrame
+            let boundsOffsetX = clippedFrame.origin.x - unclampedFrameInHost.origin.x
+
+            // PTY resize only when the pane's actual size changes, not
+            // when the visible clip region changes during scrolling.
+            let paneResized = abs(oldFrame.width - fullSize.width) > 1 ||
+                              abs(oldFrame.height - fullSize.height) > 1
+
+            // Check if the visible frame changed (position or clip)
+            let visibleFrameChanged = !Self.rectApproximatelyEqual(hostedView.frame, clippedFrame)
 
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            if sizeChanged {
-                hostedView.frame = stableFrame
-                let expectedBounds = NSRect(origin: .zero, size: stableFrame.size)
+            if visibleFrameChanged {
+                hostedView.frame = clippedFrame
+            }
+            // Always keep bounds at the full pane size with scroll offset
+            let expectedBounds = NSRect(
+                x: boundsOffsetX,
+                y: 0,
+                width: fullSize.width,
+                height: fullSize.height
+            )
+            if !Self.rectApproximatelyEqual(hostedView.bounds, expectedBounds) {
                 hostedView.bounds = expectedBounds
-            } else if positionChanged {
-                hostedView.setFrameOrigin(stableFrame.origin)
             }
             CATransaction.commit()
-            if sizeChanged {
+            if paneResized {
                 hostedView.reconcileGeometryNow()
                 hostedView.refreshSurfaceNow(reason: "portal.frameChange")
             }
