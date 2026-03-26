@@ -7537,6 +7537,9 @@ final class GhosttySurfaceScrollView: NSView {
             tabId: terminalSurface.tabId,
             surfaceId: terminalSurface.id,
             searchState: searchState,
+            canApplyFocusRequest: { [weak self] in
+                self?.canApplyMountedSearchFieldFocusRequest() ?? false
+            },
             onMoveFocusToTerminal: { [weak self] in
                 self?.searchFocusTarget = .terminal
                 self?.moveFocus()
@@ -7568,6 +7571,17 @@ final class GhosttySurfaceScrollView: NSView {
         return nil
     }
 
+    private func canApplyMountedSearchFieldFocusRequest() -> Bool {
+        guard let terminalSurface = surfaceView.terminalSurface,
+              let app = AppDelegate.shared,
+              let manager = app.tabManagerFor(tabId: terminalSurface.tabId),
+              manager.selectedTabId == terminalSurface.tabId,
+              let workspace = manager.tabs.first(where: { $0.id == terminalSurface.tabId }) else {
+            return false
+        }
+        return workspace.focusedPanelId == terminalSurface.id
+    }
+
     private func requestMountedSearchFieldFocus(
         generation: UInt64,
         force: Bool,
@@ -7575,6 +7589,7 @@ final class GhosttySurfaceScrollView: NSView {
     ) {
         guard searchOverlayMutationGeneration == generation else { return }
         guard force || searchFocusTarget == .searchField else { return }
+        guard canApplyMountedSearchFieldFocusRequest() else { return }
         guard let overlay = searchOverlayHostingView,
               overlay.superview === self,
               let window,
