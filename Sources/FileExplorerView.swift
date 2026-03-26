@@ -434,11 +434,7 @@ struct FileExplorerTitlebarButton: View {
 final class FileExplorerTitlebarAccessoryViewController: NSTitlebarAccessoryViewController {
     private let hostingView: NonDraggableHostingView<FileExplorerTitlebarButton>
     private let containerView = NSView()
-    private var pendingSizeUpdate = false
-    private var fittingSizeNeedsRefresh = true
-    private var cachedFittingSize: NSSize?
-    private var lastObservedViewSize: NSSize = .zero
-    private var showsWorkspaceTitlebar: Bool { !WorkspacePresentationModeSettings.isMinimal() }
+    private var didInitialLayout = false
 
     init(onToggle: @escaping () -> Void) {
         let style = TitlebarControlsStyle(rawValue: UserDefaults.standard.integer(forKey: "titlebarControlsStyle")) ?? .classic
@@ -456,10 +452,17 @@ final class FileExplorerTitlebarAccessoryViewController: NSTitlebarAccessoryView
         containerView.wantsLayer = true
         containerView.layer?.masksToBounds = false
         hostingView.translatesAutoresizingMaskIntoConstraints = true
-        hostingView.autoresizingMask = [.width, .height]
         containerView.addSubview(hostingView)
 
-        scheduleSizeUpdate(invalidateFittingSize: true)
+        // Compute initial size once from the hosting view's fitting size
+        hostingView.layoutSubtreeIfNeeded()
+        let fitting = hostingView.fittingSize
+        let width = fitting.width + 8
+        let height = max(fitting.height, 28)
+        preferredContentSize = NSSize(width: width, height: height)
+        containerView.frame = NSRect(x: 0, y: 0, width: width, height: height)
+        let yOffset = max(0, (height - fitting.height) / 2.0)
+        hostingView.frame = NSRect(x: 0, y: yOffset, width: fitting.width, height: fitting.height)
     }
 
     required init?(coder: NSCoder) {
@@ -468,52 +471,11 @@ final class FileExplorerTitlebarAccessoryViewController: NSTitlebarAccessoryView
 
     override func viewDidAppear() {
         super.viewDidAppear()
-        scheduleSizeUpdate(invalidateFittingSize: true)
-    }
-
-    override func viewDidLayout() {
-        super.viewDidLayout()
-        let currentViewSize = view.bounds.size
-        guard abs(currentViewSize.width - lastObservedViewSize.width) > 0.5
-                || abs(currentViewSize.height - lastObservedViewSize.height) > 0.5 else {
-            return
-        }
-        lastObservedViewSize = currentViewSize
-        scheduleSizeUpdate(invalidateFittingSize: true)
-    }
-
-    private func scheduleSizeUpdate(invalidateFittingSize: Bool = false) {
-        if invalidateFittingSize {
-            fittingSizeNeedsRefresh = true
-        }
-        guard !pendingSizeUpdate else { return }
-        pendingSizeUpdate = true
-        DispatchQueue.main.async { [weak self] in
-            self?.pendingSizeUpdate = false
-            self?.updateSize()
-        }
-    }
-
-    private func updateSize() {
-        guard showsWorkspaceTitlebar else {
-            view.isHidden = true
-            preferredContentSize = .zero
-            containerView.frame = .zero
-            hostingView.frame = .zero
-            return
-        }
-        view.isHidden = false
-
-        let contentSize: NSSize
-        if fittingSizeNeedsRefresh || cachedFittingSize == nil {
-            hostingView.invalidateIntrinsicContentSize()
-            hostingView.layoutSubtreeIfNeeded()
-            cachedFittingSize = hostingView.fittingSize
-            fittingSizeNeedsRefresh = false
-        }
-        contentSize = cachedFittingSize ?? .zero
-        guard contentSize.width > 0, contentSize.height > 0 else { return }
-
+        guard !didInitialLayout else { return }
+        didInitialLayout = true
+        // Re-measure once after attached to window (titlebar height is now known)
+        let fitting = hostingView.fittingSize
+        guard fitting.width > 0, fitting.height > 0 else { return }
         let titlebarHeight: CGFloat = {
             if let window = view.window,
                let closeButton = window.standardWindowButton(.closeButton),
@@ -521,13 +483,13 @@ final class FileExplorerTitlebarAccessoryViewController: NSTitlebarAccessoryView
                titlebarView.frame.height > 0 {
                 return titlebarView.frame.height
             }
-            return view.window.map { $0.frame.height - $0.contentLayoutRect.height } ?? contentSize.height
+            return fitting.height
         }()
-
-        let containerHeight = max(contentSize.height, titlebarHeight)
-        let yOffset = max(0, (containerHeight - contentSize.height) / 2.0)
-        preferredContentSize = NSSize(width: contentSize.width + 8, height: containerHeight)
-        containerView.frame = NSRect(x: 0, y: 0, width: contentSize.width + 8, height: containerHeight)
-        hostingView.frame = NSRect(x: 0, y: yOffset, width: contentSize.width, height: contentSize.height)
+        let containerHeight = max(fitting.height, titlebarHeight)
+        let yOffset = max(0, (containerHeight - fitting.height) / 2.0)
+        let width = fitting.width + 8
+        preferredContentSize = NSSize(width: width, height: containerHeight)
+        containerView.frame = NSRect(x: 0, y: 0, width: width, height: containerHeight)
+        hostingView.frame = NSRect(x: 0, y: yOffset, width: fitting.width, height: fitting.height)
     }
 }
