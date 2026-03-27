@@ -379,13 +379,6 @@ struct WorkspaceContentView: View {
             if isMinimalMode {
                 bonsplitView
                     .ignoresSafeArea(.container, edges: .top)
-                    .overlay(alignment: .top) {
-                        if isWorkspaceInputActive {
-                            WindowDragHandleView()
-                                .frame(height: WorkspaceTitlebarInteractionMetrics.minimalModeTopStripHeight)
-                                .background(TitlebarDoubleClickMonitorView())
-                        }
-                    }
             } else {
                 bonsplitView
             }

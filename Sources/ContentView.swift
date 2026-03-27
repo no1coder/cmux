@@ -3109,9 +3109,12 @@ struct ContentView: View {
             // Do not make the entire background draggable; it interferes with drag gestures
             // like sidebar tab reordering in multi-window mode.
             window.isMovableByWindowBackground = false
-            // Keep the window immovable by default so titlebar controls (like the folder icon)
-            // cannot accidentally initiate native window drags.
-            window.isMovable = false
+            // In minimal mode the custom titlebar is hidden and the toolbar is removed,
+            // so enable native titlebar dragging so the tab bar area (which overlaps the
+            // native titlebar) can move the window. In standard mode keep it disabled
+            // because our custom WindowDragHandleView handles dragging.
+            let isMinimal = WorkspacePresentationModeSettings.isMinimal()
+            window.isMovable = isMinimal
             window.styleMask.insert(.fullSizeContentView)
 
             // Track this window for fullscreen notifications
