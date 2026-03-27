@@ -7,9 +7,7 @@ import ObjectiveC
 import UniformTypeIdentifiers
 import WebKit
 
-#if DEBUG
-private var _minimalDragDebugMonitorKey: UInt8 = 0
-#endif
+private var _minimalModeDoubleClickMonitorKey: UInt8 = 0
 
 private extension Color {
     init?(hex: String) {
@@ -2642,37 +2640,29 @@ struct ContentView: View {
                 .background(Color.clear)
         )
 
-        #if DEBUG
+        // In minimal mode, intercept double-clicks in the tab bar area and perform
+        // the standard titlebar action (zoom/minimize) instead of letting Bonsplit
+        // create a new tab. The monitor is installed once per window and checks the
+        // current mode on each event so it adapts to mode toggles.
         view = AnyView(view.background(
             WindowAccessor { window in
-                if WorkspacePresentationModeSettings.isMinimal() {
-                    // One-shot monitor to log hit view info on next click
-                    if objc_getAssociatedObject(window, &_minimalDragDebugMonitorKey) == nil {
-                        let monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
-                            guard let window = event.window,
-                                  WorkspacePresentationModeSettings.isMinimal() else { return event }
-                            let loc = event.locationInWindow
-                            if let hitView = window.contentView?.hitTest(loc) {
-                                var chain = [String]()
-                                var v: NSView? = hitView
-                                while let current = v, chain.count < 8 {
-                                    chain.append("\(type(of: current))(canMove=\(current.mouseDownCanMoveWindow))")
-                                    v = current.superview
-                                }
-                                dlog("window.drag.hitTest loc=\(loc) chain=\(chain.joined(separator: " > "))")
-                            } else {
-                                dlog("window.drag.hitTest loc=\(loc) hit=nil")
-                            }
-                            dlog("window.drag.state isMovable=\(window.isMovable) isMovableByBg=\(window.isMovableByWindowBackground) toolbar=\(window.toolbar != nil)")
-                            return event
-                        }
-                        objc_setAssociatedObject(window, &_minimalDragDebugMonitorKey, monitor, .OBJC_ASSOCIATION_RETAIN)
-                    }
+                guard objc_getAssociatedObject(window, &_minimalModeDoubleClickMonitorKey) == nil else { return }
+                let monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
+                    guard event.clickCount >= 2,
+                          WorkspacePresentationModeSettings.isMinimal(),
+                          let window = event.window else { return event }
+                    // Only intercept in the top strip (tab bar area)
+                    let contentHeight = window.contentLayoutRect.height
+                    let clickY = event.locationInWindow.y
+                    let distFromTop = contentHeight - clickY
+                    guard distFromTop <= 30 else { return event }
+                    performStandardTitlebarDoubleClick(window: window)
+                    return nil
                 }
+                objc_setAssociatedObject(window, &_minimalModeDoubleClickMonitorKey, monitor, .OBJC_ASSOCIATION_RETAIN)
             }
             .frame(width: 0, height: 0)
         ))
-        #endif
         view = AnyView(view.onAppear {
             tabManager.applyWindowBackgroundForSelectedTab()
             reconcileMountedWorkspaceIds()
@@ -3147,9 +3137,6 @@ struct ContentView: View {
             // to avoid interfering with sidebar tab reordering.
             window.isMovableByWindowBackground = isMinimal
             window.isMovable = isMinimal
-            #if DEBUG
-            dlog("window.drag.config isMinimal=\(isMinimal) isMovable=\(window.isMovable) isMovableByBg=\(window.isMovableByWindowBackground) presentationMode=\(workspacePresentationMode)")
-            #endif
             window.styleMask.insert(.fullSizeContentView)
 
             // Track this window for fullscreen notifications

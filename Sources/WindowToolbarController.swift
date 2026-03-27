@@ -85,9 +85,6 @@ final class WindowToolbarController: NSObject, NSToolbarDelegate {
             } else {
                 attach(to: window)
             }
-            #if DEBUG
-            NSLog("window.toolbar.modeChange mode=\(currentMode) toolbar=\(window.toolbar != nil) isMovable=\(window.isMovable) isMovableByBg=\(window.isMovableByWindowBackground)")
-            #endif
         }
     }
 
