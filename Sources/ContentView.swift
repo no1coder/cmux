@@ -2256,6 +2256,17 @@ struct ContentView: View {
                 if isResizerDragging {
                     TerminalWindowPortalRegistry.endInteractiveGeometryResize()
                     isResizerDragging = false
+#if DEBUG
+                    dlog(
+                        "sidebar.resize.cancel width=\(String(format: "%.1f", sidebarWidth)) " +
+                        "visible=\(sidebarState.isVisible ? 1 : 0)"
+                    )
+#endif
+                    if let observedWindow {
+                        TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronize(for: observedWindow)
+                    } else {
+                        TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronizeForAllWindows()
+                    }
                 }
                 sidebarDragStartWidth = nil
                 isResizerBandActive = false
@@ -2284,6 +2295,17 @@ struct ContentView: View {
                         if isResizerDragging {
                             TerminalWindowPortalRegistry.endInteractiveGeometryResize()
                             isResizerDragging = false
+#if DEBUG
+                            dlog(
+                                "sidebar.resize.end width=\(String(format: "%.1f", sidebarWidth)) " +
+                                "visible=\(sidebarState.isVisible ? 1 : 0)"
+                            )
+#endif
+                            if let observedWindow {
+                                TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronize(for: observedWindow)
+                            } else {
+                                TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronizeForAllWindows()
+                            }
                             sidebarDragStartWidth = nil
                         }
                         activateSidebarResizerCursor()
@@ -3072,6 +3094,12 @@ struct ContentView: View {
             if abs(sidebarState.persistedWidth - sanitized) > 0.5 {
                 sidebarState.persistedWidth = sanitized
             }
+#if DEBUG
+            dlog(
+                "sidebar.resize.change width=\(String(format: "%.1f", sanitized)) " +
+                "dragging=\(isResizerDragging ? 1 : 0) visible=\(sidebarState.isVisible ? 1 : 0)"
+            )
+#endif
             // Sidebar width changes are pure SwiftUI layout updates, so portal-hosted
             // terminals need an explicit post-layout geometry resync.
             if let observedWindow {

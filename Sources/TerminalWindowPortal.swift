@@ -594,6 +594,7 @@ final class WindowTerminalPortal: NSObject {
     private var installConstraints: [NSLayoutConstraint] = []
     private var hasDeferredFullSyncScheduled = false
     private var hasExternalGeometrySyncScheduled = false
+    private var hasPendingExternalGeometrySyncFollowUp = false
     private var geometryObservers: [NSObjectProtocol] = []
 #if DEBUG
     private var lastLoggedBonsplitContainerSignature: String?
@@ -687,7 +688,16 @@ final class WindowTerminalPortal: NSObject {
     }
 
     fileprivate func scheduleExternalGeometrySynchronize() {
-        guard !hasExternalGeometrySyncScheduled else { return }
+        guard !hasExternalGeometrySyncScheduled else {
+            hasPendingExternalGeometrySyncFollowUp = true
+#if DEBUG
+            dlog(
+                "portal.externalGeometrySync.coalesce host=\(portalDebugToken(hostView)) " +
+                "frame=\(portalDebugFrame(hostView.frame))"
+            )
+#endif
+            return
+        }
         hasExternalGeometrySyncScheduled = true
         let isDragEvent = TerminalWindowPortalRegistry.isInteractiveGeometryResizeActive
         let requiresSettledLayout = !(hostView.inLiveResize || window?.inLiveResize == true || isDragEvent)
@@ -696,6 +706,12 @@ final class WindowTerminalPortal: NSObject {
             let performSync = {
                 self.hasExternalGeometrySyncScheduled = false
                 self.synchronizeAllEntriesFromExternalGeometryChange()
+                if self.hasPendingExternalGeometrySyncFollowUp {
+                    self.hasPendingExternalGeometrySyncFollowUp = false
+                    if !self.hasExternalGeometrySyncScheduled {
+                        self.scheduleExternalGeometrySynchronize()
+                    }
+                }
             }
             if requiresSettledLayout {
                 DispatchQueue.main.async(execute: performSync)
@@ -746,13 +762,27 @@ final class WindowTerminalPortal: NSObject {
         guard ensureInstalled() else { return }
         synchronizeLayoutHierarchy()
         synchronizeAllHostedViews(excluding: nil)
+#if DEBUG
+        dlog(
+            "portal.externalGeometrySync.run host=\(portalDebugToken(hostView)) " +
+            "frame=\(portalDebugFrame(hostView.frame)) entries=\(entriesByHostedId.count) " +
+            "interactive=\(TerminalWindowPortalRegistry.isInteractiveGeometryResizeActive ? 1 : 0)"
+        )
+#endif
 
         // During live resize, AppKit can deliver frame churn where host/container geometry
         // settles a tick before the terminal's own scroll/surface hierarchy. Only force an
         // in-place surface refresh when reconciliation actually changed terminal geometry.
         for entry in entriesByHostedId.values {
             guard let hostedView = entry.hostedView, !hostedView.isHidden else { continue }
-            if hostedView.reconcileGeometryNow() {
+            let didChange = hostedView.reconcileGeometryNow()
+#if DEBUG
+            dlog(
+                "portal.externalGeometrySync.entry surface=\(hostedView.debugSurfaceId?.uuidString.prefix(5) ?? "nil") " +
+                "frame=\(portalDebugFrame(hostedView.frame)) changed=\(didChange ? 1 : 0)"
+            )
+#endif
+            if didChange {
                 hostedView.refreshSurfaceNow(reason: "portal.externalGeometrySync")
             }
         }
