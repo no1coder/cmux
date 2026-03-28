@@ -500,6 +500,9 @@ struct cmuxApp: App {
                     Button("Sidebar Debug…") {
                         SidebarDebugWindowController.shared.show()
                     }
+                    Button("Split Button Layout Debug…") {
+                        SplitButtonLayoutDebugWindowController.shared.show()
+                    }
                     Button("Open All Debug Windows") {
                         openAllDebugWindows()
                     }
@@ -3321,6 +3324,75 @@ private struct MenuBarExtraDebugView: View {
 
     private func applyLiveUpdate() {
         AppDelegate.shared?.refreshMenuBarExtraForDebug()
+    }
+}
+
+// MARK: - Split Button Layout Debug Window
+
+private final class SplitButtonLayoutDebugWindowController: NSWindowController, NSWindowDelegate {
+    static let shared = SplitButtonLayoutDebugWindowController()
+
+    private init() {
+        let window = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 240),
+            styleMask: [.titled, .closable, .utilityWindow],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Split Button Layout"
+        window.titleVisibility = .visible
+        window.titlebarAppearsTransparent = false
+        window.isMovableByWindowBackground = true
+        window.isReleasedWhenClosed = false
+        window.identifier = NSUserInterfaceItemIdentifier("cmux.splitButtonLayoutDebug")
+        window.center()
+        window.contentView = NSHostingView(rootView: SplitButtonLayoutDebugView())
+        AppDelegate.shared?.applyWindowDecorations(to: window)
+        super.init(window: window)
+        window.delegate = self
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    func show() {
+        window?.center()
+        window?.makeKeyAndOrderFront(nil)
+    }
+}
+
+private struct SplitButtonLayoutDebugView: View {
+    @AppStorage("debugSplitButtonLayout") private var layout = 0
+
+    private let options: [(Int, String)] = [
+        (0, "HStack sibling (no overlay)"),
+        (1, "Overlay: solid barFill bg"),
+        (2, "Overlay: opaque windowBg"),
+        (3, "Overlay: ultraThinMaterial"),
+        (4, "Overlay: fade gradient + barFill"),
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Split Button Layout")
+                .font(.headline)
+
+            ForEach(options, id: \.0) { id, label in
+                HStack {
+                    Image(systemName: layout == id ? "checkmark.circle.fill" : "circle")
+                        .foregroundColor(layout == id ? .accentColor : .secondary)
+                    Text(label)
+                }
+                .contentShape(Rectangle())
+                .onTapGesture { layout = id }
+            }
+
+            Text("Changes apply live.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 }
 
