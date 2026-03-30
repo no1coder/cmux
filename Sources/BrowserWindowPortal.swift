@@ -2060,6 +2060,7 @@ final class WindowBrowserPortal: NSObject {
     private var hasDeferredFullSyncScheduled = false
     private var hasExternalGeometrySyncScheduled = false
     private var geometryObservers: [NSObjectProtocol] = []
+    private var pendingHostedWebViewRefreshes: [ObjectIdentifier: PendingHostedWebViewRefresh] = [:]
 
     private struct Entry {
         weak var webView: WKWebView?
@@ -2073,6 +2074,12 @@ final class WindowBrowserPortal: NSObject {
         var paneTopChromeHeight: CGFloat
         var transientRecoveryReason: String?
         var transientRecoveryRetriesRemaining: Int
+    }
+
+    private struct PendingHostedWebViewRefresh {
+        var generation: UInt64 = 0
+        var asyncWorkItem: DispatchWorkItem?
+        var delayedWorkItem: DispatchWorkItem?
     }
 
     private var entriesByWebViewId: [ObjectIdentifier: Entry] = [:]
@@ -2503,6 +2510,22 @@ final class WindowBrowserPortal: NSObject {
 #endif
     }
 
+    private func cancelPendingHostedWebViewRefreshes(
+        for webViewId: ObjectIdentifier,
+        keepGeneration: Bool = false
+    ) {
+        guard var pending = pendingHostedWebViewRefreshes[webViewId] else { return }
+        pending.asyncWorkItem?.cancel()
+        pending.delayedWorkItem?.cancel()
+        if keepGeneration {
+            pending.asyncWorkItem = nil
+            pending.delayedWorkItem = nil
+            pendingHostedWebViewRefreshes[webViewId] = pending
+        } else {
+            pendingHostedWebViewRefreshes.removeValue(forKey: webViewId)
+        }
+    }
+
     private func invalidateHostedWebViewGeometry(
         _ webView: WKWebView,
         in containerView: WindowBrowserSlotView,
@@ -2523,6 +2546,15 @@ final class WindowBrowserPortal: NSObject {
         reason: String
     ) {
         guard !containerView.isHidden else { return }
+        let webViewId = ObjectIdentifier(webView)
+
+        // Bind/reveal/fullscreen refreshes can stack up during a single layout churn.
+        // Keep only the latest follow-up passes so reattach work does not pile up on
+        // the main thread while browser panes are moving between hosts.
+        var pending = pendingHostedWebViewRefreshes[webViewId] ?? PendingHostedWebViewRefresh()
+        pending.generation &+= 1
+        let generation = pending.generation
+        cancelPendingHostedWebViewRefreshes(for: webViewId, keepGeneration: true)
 
         runHostedWebViewRefreshPass(
             webView,
@@ -2531,8 +2563,10 @@ final class WindowBrowserPortal: NSObject {
             phase: "immediate",
             reattachRenderingState: true
         )
-        DispatchQueue.main.async { [weak self, weak webView, weak containerView] in
+
+        let asyncWorkItem = DispatchWorkItem { [weak self, weak webView, weak containerView] in
             guard let self, let webView, let containerView else { return }
+            guard self.pendingHostedWebViewRefreshes[webViewId]?.generation == generation else { return }
             self.runHostedWebViewRefreshPass(
                 webView,
                 in: containerView,
@@ -2541,8 +2575,20 @@ final class WindowBrowserPortal: NSObject {
                 reattachRenderingState: true
             )
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self, weak webView, weak containerView] in
-            guard let self, let webView, let containerView else { return }
+        pending.asyncWorkItem = asyncWorkItem
+
+        let delayedWorkItem = DispatchWorkItem { [weak self, weak webView, weak containerView] in
+            guard let self else { return }
+            defer {
+                if var current = self.pendingHostedWebViewRefreshes[webViewId],
+                   current.generation == generation {
+                    current.asyncWorkItem = nil
+                    current.delayedWorkItem = nil
+                    self.pendingHostedWebViewRefreshes[webViewId] = current
+                }
+            }
+            guard let webView, let containerView else { return }
+            guard self.pendingHostedWebViewRefreshes[webViewId]?.generation == generation else { return }
             self.runHostedWebViewRefreshPass(
                 webView,
                 in: containerView,
@@ -2551,6 +2597,11 @@ final class WindowBrowserPortal: NSObject {
                 reattachRenderingState: true
             )
         }
+        pending.delayedWorkItem = delayedWorkItem
+        pendingHostedWebViewRefreshes[webViewId] = pending
+
+        DispatchQueue.main.async(execute: asyncWorkItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03, execute: delayedWorkItem)
     }
 
     private enum HostedWebViewPresentationUpdateKind {
@@ -2633,6 +2684,7 @@ final class WindowBrowserPortal: NSObject {
     }
 
     func detachWebView(withId webViewId: ObjectIdentifier) {
+        cancelPendingHostedWebViewRefreshes(for: webViewId)
         guard let entry = entriesByWebViewId.removeValue(forKey: webViewId) else { return }
         if let anchor = entry.anchorView {
             webViewByAnchorId.removeValue(forKey: ObjectIdentifier(anchor))
@@ -2737,19 +2789,8 @@ final class WindowBrowserPortal: NSObject {
         guard ensureInstalled() else { return }
         synchronizeWebView(
             withId: webViewId,
-            source: "forceRefresh",
+            source: "forceRefresh:\(reason)",
             forcePresentationRefresh: true
-        )
-        guard let entry = entriesByWebViewId[webViewId],
-              let webView = entry.webView,
-              let containerView = entry.containerView,
-              !containerView.isHidden else {
-            return
-        }
-        refreshHostedWebViewPresentation(
-            webView,
-            in: containerView,
-            reason: reason
         )
     }
 
@@ -2999,6 +3040,7 @@ final class WindowBrowserPortal: NSObject {
         }
         let previousTransientRecoveryReason = entry.transientRecoveryReason
         func hideContainerView(reason: String) {
+            cancelPendingHostedWebViewRefreshes(for: webViewId)
             containerView.setPaneTopChromeHeight(0)
             containerView.setSearchOverlay(nil)
             containerView.setPaneDropContext(nil)
