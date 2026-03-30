@@ -1497,6 +1497,66 @@ final class TerminalNotificationDirectInteractionTests: XCTestCase {
         XCTAssertFalse(store.hasUnreadNotification(forTabId: workspace.id, surfaceId: terminalPanel.id))
         XCTAssertEqual(GhosttySurfaceScrollView.flashCount(for: terminalPanel.id), 1)
     }
+
+    func testKeyDownRecoversReleasedSurfaceWhileHostedViewIsDetached() throws {
+#if DEBUG
+        let window = makeWindow()
+        defer { window.orderOut(nil) }
+
+        guard let contentView = window.contentView else {
+            XCTFail("Expected content view")
+            return
+        }
+
+        let surface = TerminalSurface(
+            tabId: UUID(),
+            context: GHOSTTY_SURFACE_CONTEXT_SPLIT,
+            configTemplate: nil,
+            workingDirectory: nil
+        )
+        let hostedView = surface.hostedView
+        hostedView.frame = contentView.bounds
+        hostedView.autoresizingMask = [.width, .height]
+        contentView.addSubview(hostedView)
+
+        window.makeKeyAndOrderFront(nil)
+        window.displayIfNeeded()
+        contentView.layoutSubtreeIfNeeded()
+        hostedView.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+
+        guard let surfaceView = surfaceView(in: hostedView) as? GhosttyNSView else {
+            XCTFail("Expected terminal surface view")
+            return
+        }
+        XCTAssertNotNil(surface.surface, "Expected runtime surface before simulating the detach race")
+
+        surface.releaseSurfaceForTesting()
+        XCTAssertNil(surface.surface, "Expected runtime surface to be released for the regression setup")
+
+        hostedView.removeFromSuperview()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertNil(surfaceView.window, "Expected hosted terminal view to be detached from any window")
+
+        let event = makeKeyEvent(characters: "a", keyCode: 0, window: window)
+        surfaceView.keyDown(with: event)
+
+        let recovered = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                surface.surface != nil
+            },
+            object: NSObject()
+        )
+        wait(for: [recovered], timeout: 1.0)
+
+        XCTAssertNotNil(
+            surface.surface,
+            "Missing-surface keyDown should request background surface recreation instead of leaving terminal input dead"
+        )
+#else
+        throw XCTSkip("Debug-only regression test")
+#endif
+    }
 }
 
 
