@@ -15,12 +15,14 @@ struct TerminalRemoteDaemonAttachmentStatus: Decodable, Equatable, Sendable {
     let attachmentID: String
     let cols: Int
     let rows: Int
-    let updatedAt: Date
+    let mode: String?
+    let updatedAt: Date?
 
     private enum CodingKeys: String, CodingKey {
         case attachmentID = "attachment_id"
         case cols
         case rows
+        case mode
         case updatedAt = "updated_at"
     }
 }
@@ -303,6 +305,7 @@ actor TerminalRemoteDaemonClient {
         do {
             envelope = try decoder.decode(TerminalRemoteDaemonResponseEnvelope<ResponsePayload>.self, from: data)
         } catch {
+            NSLog("📱 RPC decode error: %@ for type %@ line: %@", String(describing: error), String(describing: responseType), String(line.prefix(200)))
             throw TerminalRemoteDaemonClientError.invalidJSON(line)
         }
 
