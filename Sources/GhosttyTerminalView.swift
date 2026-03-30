@@ -6419,7 +6419,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         guard cmdHeld else {
             if wordPathHoverActive {
                 wordPathHoverActive = false
-                window?.invalidateCursorRects(for: self)
+                NSCursor.pop()
             }
             return
         }
@@ -6427,11 +6427,11 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         if resolveWordUnderCursorAsPath() != nil {
             if !wordPathHoverActive {
                 wordPathHoverActive = true
-                NSCursor.pointingHand.set()
+                NSCursor.pointingHand.push()
             }
         } else if wordPathHoverActive {
             wordPathHoverActive = false
-            window?.invalidateCursorRects(for: self)
+            NSCursor.pop()
         }
     }
 
