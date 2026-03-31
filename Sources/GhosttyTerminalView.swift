@@ -2592,7 +2592,7 @@ class GhosttyApp {
                 }
             }
             return true
-        case ghostty_action_tag_e(rawValue: 33): // GHOSTTY_ACTION_SET_TAB_TITLE
+        case ghostty_action_tag_e(rawValue: 64): // GHOSTTY_ACTION_SET_TAB_TITLE (moved to end to avoid shifting existing values)
             let title = action.action.set_title.title
                 .flatMap { String(cString: $0) } ?? ""
             if let tabId = surfaceView.tabId,
