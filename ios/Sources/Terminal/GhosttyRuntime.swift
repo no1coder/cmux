@@ -68,11 +68,13 @@ final class GhosttyRuntime {
 
         // Read back background color to verify config was applied
         var bgColor = ghostty_config_color_s()
-        let hasBg = ghostty_config_get(config, &bgColor, "background", UInt(MemoryLayout<ghostty_config_color_s>.size))
+        let bgKey = "background"
+        let hasBg = ghostty_config_get(config, &bgColor, bgKey, UInt(bgKey.lengthOfBytes(using: .utf8)))
         NSLog("📱 GhosttyRuntime: background config get=%d r=%d g=%d b=%d", hasBg ? 1 : 0, bgColor.r, bgColor.g, bgColor.b)
 
         var fontSize: Float64 = 0
-        let hasFont = ghostty_config_get(config, &fontSize, "font-size", UInt(MemoryLayout<Float64>.size))
+        let fontKey = "font-size"
+        let hasFont = ghostty_config_get(config, &fontSize, fontKey, UInt(fontKey.lengthOfBytes(using: .utf8)))
         NSLog("📱 GhosttyRuntime: font-size config get=%d value=%f", hasFont ? 1 : 0, fontSize)
         #endif
 
@@ -87,6 +89,7 @@ final class GhosttyRuntime {
             },
             read_clipboard_cb: { userdata, location, state in
                 GhosttyRuntime.handleReadClipboard(userdata, location: location, state: state)
+                return true
             },
             confirm_read_clipboard_cb: { _, _, _, _ in
                 // iOS embed doesn't currently support clipboard confirmation prompts.
@@ -192,7 +195,8 @@ final class GhosttyRuntime {
         try? FileManager.default.removeItem(at: tmpFile)
 
         var bgColor = ghostty_config_color_s()
-        let hasBg = ghostty_config_get(config, &bgColor, "background", UInt(MemoryLayout<ghostty_config_color_s>.size))
+        let bgKey2 = "background"
+        let hasBg = ghostty_config_get(config, &bgColor, bgKey2, UInt(bgKey2.lengthOfBytes(using: .utf8)))
         NSLog("📱 applyiOSDefaults: bg get=%d r=%d g=%d b=%d", hasBg ? 1 : 0, bgColor.r, bgColor.g, bgColor.b)
     }
 
@@ -203,11 +207,11 @@ final class GhosttyRuntime {
         guard !FileManager.default.fileExists(atPath: configFile.path) else { return }
 
         let defaultConfig = """
-        font-size = 20
+        font-size = 14
         cursor-style = bar
         cursor-style-blink = true
-        background = #ff0000
-        foreground = #00ff00
+        background = #272822
+        foreground = #fdfff1
         cursor-color = #c0c1b5
         selection-background = #57584f
         selection-foreground = #fdfff1
