@@ -47815,6 +47815,57 @@
         }
       }
     },
+    "settings.app.copyOnSelect": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copy on Select"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "選択時にコピー"
+          }
+        }
+      }
+    },
+    "settings.app.copyOnSelect.subtitleOff": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Selecting terminal text does not copy it to the system clipboard."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ターミナルテキストを選択してもシステムのクリップボードにはコピーしません。"
+          }
+        }
+      }
+    },
+    "settings.app.copyOnSelect.subtitleOn": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Automatically copy selected terminal text to the system clipboard."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "選択したターミナルテキストをシステムのクリップボードに自動でコピーします。"
+          }
+        }
+      }
+    },
     "settings.app.paneFirstClickFocus": {
       "extractionState": "manual",
       "localizations": {
@@ -83198,6 +83249,40 @@
         }
       }
     },
+    "settings.sidebarAppearance.matchTerminalBackground": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Match Terminal Background"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ターミナルの背景に合わせる"
+          }
+        }
+      }
+    },
+    "settings.sidebarAppearance.matchTerminalBackground.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use the same background color and transparency as the terminal."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ターミナルと同じ背景色と透明度を使用します。"
+          }
+        }
+      }
+    },
     "settings.sidebarAppearance.tintColorLight": {
       "extractionState": "manual",
       "localizations": {
@@ -84827,6 +84912,108 @@
           "stringUnit": {
             "state": "translated",
             "value": "ワークスペースの内容を表示できません"
+          }
+        }
+      }
+    },
+    "terminalContextMenu.copy": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copy"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "コピー"
+          }
+        }
+      }
+    },
+    "terminalContextMenu.paste": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paste"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ペースト"
+          }
+        }
+      }
+    },
+    "terminalContextMenu.resetTerminal": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reset Terminal"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ターミナルをリセット"
+          }
+        }
+      }
+    },
+    "terminalContextMenu.splitHorizontally": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Split Horizontally"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "水平に分割"
+          }
+        }
+      }
+    },
+    "terminalContextMenu.splitVertically": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Split Vertically"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "垂直に分割"
+          }
+        }
+      }
+    },
+    "terminalContextMenu.triggerFlash": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Trigger Flash"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "フラッシュを発火"
           }
         }
       }
