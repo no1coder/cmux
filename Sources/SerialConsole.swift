@@ -71,6 +71,15 @@ struct SerialConsoleConfiguration: Codable, Equatable, Sendable {
     var parity: SerialConsoleParity
     var flowControl: SerialConsoleFlowControl
 
+    private enum CodingKeys: String, CodingKey {
+        case devicePath
+        case baudRate
+        case dataBits
+        case stopBits
+        case parity
+        case flowControl
+    }
+
     init(
         devicePath: String,
         baudRate: Int = 115_200,
@@ -85,6 +94,24 @@ struct SerialConsoleConfiguration: Codable, Equatable, Sendable {
         self.stopBits = stopBits
         self.parity = parity
         self.flowControl = flowControl
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        devicePath = try container.decode(String.self, forKey: .devicePath)
+        baudRate = try container.decode(Int.self, forKey: .baudRate)
+
+        let dataBitsRaw = try container.decodeIfPresent(Int.self, forKey: .dataBits)
+        dataBits = dataBitsRaw.flatMap(SerialConsoleDataBits.init(rawValue:)) ?? .eight
+
+        let stopBitsRaw = try container.decodeIfPresent(Int.self, forKey: .stopBits)
+        stopBits = stopBitsRaw.flatMap(SerialConsoleStopBits.init(rawValue:)) ?? .one
+
+        let parityRaw = try container.decodeIfPresent(String.self, forKey: .parity)
+        parity = parityRaw.flatMap(SerialConsoleParity.init(rawValue:)) ?? .none
+
+        let flowControlRaw = try container.decodeIfPresent(String.self, forKey: .flowControl)
+        flowControl = flowControlRaw.flatMap(SerialConsoleFlowControl.init(rawValue:)) ?? .none
     }
 
     var trimmedDevicePath: String {
