@@ -116,12 +116,61 @@ final class WorkspaceDescriptionUITests: XCTestCase {
         assertSavedDescription(description, in: app)
     }
 
+    func testSidebarRendersSavedDescriptionWithLineBreaks() {
+        let app = configuredSidebarApp()
+        launchAndActivate(app)
+
+        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 6.0))
+
+        let token = String(UUID().uuidString.prefix(8))
+        let firstLine = "Sidebar first \(token)"
+        let secondLine = "Sidebar second \(token)"
+        let description = "\(firstLine)\n\(secondLine)"
+
+        app.typeKey("e", modifierFlags: [.command, .shift])
+
+        let editor = requireDescriptionEditor(
+            in: app,
+            timeout: 5.0,
+            failureMessage: "Expected Cmd+Shift+E to open the workspace description editor in a simple workspace"
+        )
+
+        app.typeText(firstLine)
+        app.typeKey(XCUIKeyboardKey.return.rawValue, modifierFlags: [.shift])
+        app.typeText(secondLine)
+        app.typeKey(XCUIKeyboardKey.return.rawValue, modifierFlags: [])
+
+        XCTAssertTrue(
+            waitForNonExistence(editor, timeout: 5.0),
+            "Expected Enter to save and dismiss the workspace description editor after multiline input"
+        )
+
+        let renderedDescription = app
+            .descendants(matching: .staticText)
+            .matching(NSPredicate(format: "label == %@", description))
+            .firstMatch
+
+        XCTAssertTrue(
+            workspaceDescriptionPollUntil(timeout: 5.0) {
+                renderedDescription.exists
+            },
+            "Expected the sidebar to render the saved multiline description with a newline-preserving label"
+        )
+    }
+
     private func configuredApp() -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment["CMUX_UI_TEST_MODE"] = "1"
         app.launchEnvironment["CMUX_UI_TEST_GOTO_SPLIT_SETUP"] = "1"
         app.launchEnvironment["CMUX_UI_TEST_GOTO_SPLIT_PATH"] = dataPath
         app.launchEnvironment["CMUX_UI_TEST_FOCUS_SHORTCUTS"] = "1"
+        app.launchEnvironment["CMUX_TAG"] = launchTag
+        return app
+    }
+
+    private func configuredSidebarApp() -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchEnvironment["CMUX_UI_TEST_MODE"] = "1"
         app.launchEnvironment["CMUX_TAG"] = launchTag
         return app
     }
@@ -234,6 +283,24 @@ final class WorkspaceDescriptionUITests: XCTestCase {
         if app.state == .runningBackground { return }
 
         XCTFail("App failed to start. state=\(app.state.rawValue)")
+    }
+
+    private func launchAndActivate(_ app: XCUIApplication, activateTimeout: TimeInterval = 2.0) {
+        app.launch()
+        let activated = workspaceDescriptionPollUntil(timeout: activateTimeout) {
+            guard app.state != .runningForeground else {
+                return true
+            }
+            app.activate()
+            return app.state == .runningForeground
+        }
+        if !activated {
+            app.activate()
+        }
+        XCTAssertTrue(
+            workspaceDescriptionPollUntil(timeout: 2.0) { app.state == .runningForeground },
+            "App did not reach runningForeground before UI interactions"
+        )
     }
 
     private func waitForData(keys: [String], timeout: TimeInterval) -> Bool {
