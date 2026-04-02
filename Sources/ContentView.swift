@@ -13927,7 +13927,7 @@ enum SidebarMarkdownRenderer {
     static func renderWorkspaceDescription(_ markdown: String) -> AttributedString? {
         try? AttributedString(
             markdown: markdown,
-            options: .init(interpretedSyntax: .full)
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         )
     }
 }
