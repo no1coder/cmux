@@ -80,6 +80,42 @@ final class WorkspaceDescriptionUITests: XCTestCase {
         assertSavedDescription(description, in: app)
     }
 
+    func testShiftEnterInsertsNewlineInsteadOfSubmitting() {
+        let app = configuredApp()
+        launchAndEnsureForeground(app)
+        prepareTerminalFocusedWorkspace(app)
+
+        let token = String(UUID().uuidString.prefix(8))
+        let firstLine = "First line \(token)"
+        let secondLine = "Second line \(token)"
+        let description = "\(firstLine)\n\(secondLine)"
+
+        app.typeKey("e", modifierFlags: [.command, .shift])
+
+        let editor = requireDescriptionEditor(
+            in: app,
+            timeout: 5.0,
+            failureMessage: "Expected Cmd+Shift+E to open the workspace description editor before testing Shift+Enter"
+        )
+
+        app.typeText(firstLine)
+        app.typeKey(XCUIKeyboardKey.return.rawValue, modifierFlags: [.shift])
+
+        XCTAssertTrue(
+            editor.exists,
+            "Expected Shift+Enter to keep the workspace description editor open for multiline input"
+        )
+
+        app.typeText(secondLine)
+        app.typeKey(XCUIKeyboardKey.return.rawValue, modifierFlags: [])
+
+        XCTAssertTrue(
+            waitForNonExistence(editor, timeout: 5.0),
+            "Expected Enter to save and dismiss the workspace description editor after multiline input"
+        )
+        assertSavedDescription(description, in: app)
+    }
+
     private func configuredApp() -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment["CMUX_UI_TEST_MODE"] = "1"
