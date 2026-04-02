@@ -7049,6 +7049,8 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         currentDirectory: String?,
         allowCachedHoverTarget: Bool = false
     ) -> ResolvedWordPathHoverTarget? {
+        let position = viewportPosition(at: point)
+
         if let snapshot = quicklookWordSnapshotUnderCursor(),
            let line = readViewportLine(at: snapshot.hoveredRow),
            let resolved = resolveTerminalLocalFileTarget(
@@ -7059,12 +7061,16 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
            ) {
             return ResolvedWordPathHoverTarget(
                 url: resolved.url,
-                row: snapshot.hoveredRow,
+                // Ghostty's quicklook text offsets can disagree with the
+                // viewport row we use for hover fallback across wrapped output.
+                // Cache the target on the live pointer row so internal-space
+                // hover cells reuse the same resolved file target.
+                row: position?.row ?? snapshot.hoveredRow,
                 columnRange: resolved.columnRange
             )
         }
 
-        guard let position = viewportPosition(at: point) else { return nil }
+        guard let position else { return nil }
 
         if let line = readViewportLine(at: position.row),
            let resolved = resolveTerminalLocalFileTarget(
