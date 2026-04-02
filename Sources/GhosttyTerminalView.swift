@@ -665,6 +665,38 @@ private func terminalHoveredTokenIndex(
     }?.offset
 }
 
+private func terminalHoveredColumn(
+    in line: String,
+    hoveredWord: String,
+    preferredColumn: Int?
+) -> Int? {
+    let tokenRanges = terminalWhitespaceTokenRanges(in: line)
+    guard !tokenRanges.isEmpty else { return nil }
+
+    let matches = tokenRanges.filter { range in
+        String(line[range]) == hoveredWord
+    }
+
+    if matches.isEmpty {
+        guard let preferredColumn, !line.isEmpty else { return nil }
+        return max(0, min(preferredColumn, line.count - 1))
+    }
+
+    let chosenRange = matches.min { lhs, rhs in
+        let lhsOffset = line.distance(from: line.startIndex, to: lhs.lowerBound)
+        let rhsOffset = line.distance(from: line.startIndex, to: rhs.lowerBound)
+        let preferredOffset = preferredColumn ?? lhsOffset
+        let lhsDistance = abs(lhsOffset - preferredOffset)
+        let rhsDistance = abs(rhsOffset - preferredOffset)
+        if lhsDistance == rhsDistance {
+            return lhsOffset < rhsOffset
+        }
+        return lhsDistance < rhsDistance
+    } ?? matches[0]
+
+    return line.distance(from: line.startIndex, to: chosenRange.lowerBound)
+}
+
 func resolveTerminalLocalFileURL(
     inLine rawLine: String,
     hoveredColumn: Int,
@@ -703,6 +735,26 @@ func resolveTerminalLocalFileURL(
     }
 
     return bestMatch?.url
+}
+
+func resolveTerminalLocalFileURL(
+    inLine rawLine: String,
+    hoveredWord: String,
+    preferredColumn: Int? = nil,
+    currentDirectory: String? = nil
+) -> URL? {
+    let line = rawLine.trimmingCharacters(in: .newlines)
+    guard let hoveredColumn = terminalHoveredColumn(
+        in: line,
+        hoveredWord: hoveredWord,
+        preferredColumn: preferredColumn
+    ) else { return nil }
+
+    return resolveTerminalLocalFileURL(
+        inLine: line,
+        hoveredColumn: hoveredColumn,
+        currentDirectory: currentDirectory
+    )
 }
 
 @MainActor
@@ -4717,6 +4769,12 @@ extension TerminalSurface {
 // MARK: - Ghostty Surface View
 
 class GhosttyNSView: NSView, NSUserInterfaceValidations {
+    private struct QuicklookWordSnapshot {
+        let text: String
+        let hoveredRow: Int
+        let preferredColumn: Int
+    }
+
     private static let focusDebugEnabled: Bool = {
         if ProcessInfo.processInfo.environment["CMUX_FOCUS_DEBUG"] == "1" {
             return true
@@ -6814,8 +6872,11 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         revealTerminalFileInFinder(resolvedURL)
     }
 
-    private func quicklookWordUnderCursor() -> String? {
+    private func quicklookWordSnapshotUnderCursor() -> QuicklookWordSnapshot? {
         guard let surface = surface else { return nil }
+        let surfaceSize = ghostty_surface_size(surface)
+        let columns = max(Int(surfaceSize.columns), 1)
+        let rows = max(Int(surfaceSize.rows), 1)
 
         var text = ghostty_text_s()
         guard ghostty_surface_quicklook_word(surface, &text) else { return nil }
@@ -6825,7 +6886,26 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         let wordData = Data(bytes: ptr, count: Int(text.text_len))
         guard let decodedWord = String(bytes: wordData, encoding: .utf8) else { return nil }
         let word = decodedWord.trimmingCharacters(in: .whitespacesAndNewlines)
-        return word.isEmpty ? nil : word
+        guard !word.isEmpty else { return nil }
+
+        let offsetStart = Int(text.offset_start)
+        let hoveredRow = max(0, min(offsetStart / columns, rows - 1))
+        let startColumn = max(0, min(offsetStart % columns, columns - 1))
+        let offsetLength = max(Int(text.offset_len), 1)
+        let preferredColumn = max(
+            0,
+            min(startColumn + ((offsetLength - 1) / 2), columns - 1)
+        )
+
+        return QuicklookWordSnapshot(
+            text: word,
+            hoveredRow: hoveredRow,
+            preferredColumn: preferredColumn
+        )
+    }
+
+    private func quicklookWordUnderCursor() -> String? {
+        quicklookWordSnapshotUnderCursor()?.text
     }
 
     /// Resolve the current terminal surface CWD for local relative-path lookup.
@@ -6853,7 +6933,53 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         return !workspace.isRemoteTerminalSurface(termSurface.id)
     }
 
+    private func readViewportLine(at row: Int) -> String? {
+        guard let surface = surface else { return nil }
+
+        let surfaceSize = ghostty_surface_size(surface)
+        let columns = max(Int(surfaceSize.columns), 1)
+
+        let selection = ghostty_selection_s(
+            top_left: ghostty_point_s(
+                tag: GHOSTTY_POINT_VIEWPORT,
+                coord: GHOSTTY_POINT_COORD_EXACT,
+                x: 0,
+                y: UInt32(row)
+            ),
+            bottom_right: ghostty_point_s(
+                tag: GHOSTTY_POINT_VIEWPORT,
+                coord: GHOSTTY_POINT_COORD_EXACT,
+                x: UInt32(columns - 1),
+                y: UInt32(row)
+            ),
+            rectangle: false
+        )
+
+        var text = ghostty_text_s()
+        guard ghostty_surface_read_text(surface, selection, &text) else { return nil }
+        defer { ghostty_surface_free_text(surface, &text) }
+
+        guard let ptr = text.text, text.text_len > 0 else { return nil }
+        var line = String(decoding: Data(bytes: ptr, count: Int(text.text_len)), as: UTF8.self)
+        while line.last == "\n" || line.last == "\r" {
+            line.removeLast()
+        }
+
+        return line
+    }
+
     private func resolvedLinePathUnderCursor(at point: CGPoint, currentDirectory: String?) -> URL? {
+        if let snapshot = quicklookWordSnapshotUnderCursor(),
+           let line = readViewportLine(at: snapshot.hoveredRow),
+           let resolved = resolveTerminalLocalFileURL(
+               inLine: line,
+               hoveredWord: snapshot.text,
+               preferredColumn: snapshot.preferredColumn,
+               currentDirectory: currentDirectory
+           ) {
+            return resolved
+        }
+
         guard let surface = surface else { return nil }
 
         let surfaceSize = ghostty_surface_size(surface)
@@ -6874,32 +7000,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         )
         let hoveredColumn = max(0, min(Int(floor(visiblePoint.x / resolvedCellWidth)), columns - 1))
         let hoveredRow = max(0, min(Int(floor(max(visiblePoint.y - 1, 0) / resolvedCellHeight)), rows - 1))
-
-        let selection = ghostty_selection_s(
-            top_left: ghostty_point_s(
-                tag: GHOSTTY_POINT_VIEWPORT,
-                coord: GHOSTTY_POINT_COORD_EXACT,
-                x: 0,
-                y: UInt32(hoveredRow)
-            ),
-            bottom_right: ghostty_point_s(
-                tag: GHOSTTY_POINT_VIEWPORT,
-                coord: GHOSTTY_POINT_COORD_EXACT,
-                x: UInt32(columns - 1),
-                y: UInt32(hoveredRow)
-            ),
-            rectangle: false
-        )
-
-        var text = ghostty_text_s()
-        guard ghostty_surface_read_text(surface, selection, &text) else { return nil }
-        defer { ghostty_surface_free_text(surface, &text) }
-
-        guard let ptr = text.text, text.text_len > 0 else { return nil }
-        var line = String(decoding: Data(bytes: ptr, count: Int(text.text_len)), as: UTF8.self)
-        while line.last == "\n" || line.last == "\r" {
-            line.removeLast()
-        }
+        guard let line = readViewportLine(at: hoveredRow) else { return nil }
 
         return resolveTerminalLocalFileURL(
             inLine: line,

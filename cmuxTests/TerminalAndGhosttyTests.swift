@@ -3880,6 +3880,33 @@ final class TerminalLocalFileURLResolutionTests: XCTestCase {
         }
     }
 
+    func testResolvesHoveredWordWithinFilenameWithSpaces() throws {
+        try withTemporaryDirectory { root in
+            let imageURL = root.appendingPathComponent("Group 8.png")
+            try Data().write(to: imageURL)
+
+            XCTAssertEqual(
+                resolveTerminalLocalFileURL(
+                    inLine: "- Group 8.png",
+                    hoveredWord: "Group",
+                    preferredColumn: 2,
+                    currentDirectory: root.path
+                )?.path,
+                imageURL.path
+            )
+
+            XCTAssertEqual(
+                resolveTerminalLocalFileURL(
+                    inLine: "- Group 8.png",
+                    hoveredWord: "8.png",
+                    preferredColumn: 8,
+                    currentDirectory: root.path
+                )?.path,
+                imageURL.path
+            )
+        }
+    }
+
     func testRejectsFileURLWithNonLocalHost() {
         XCTAssertNil(resolveTerminalLocalFileURL("file://example.com/etc/hosts"))
     }
