@@ -5360,6 +5360,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return isCommandPaletteResponder(responder)
     }
 
+    private func isCommandPaletteMultilineTextResponderActive(in window: NSWindow) -> Bool {
+        guard let textView = window.firstResponder as? NSTextView,
+              !textView.isFieldEditor else {
+            return false
+        }
+        return isCommandPaletteResponder(textView)
+    }
+
     private func commandPaletteMarkedTextInput(in window: NSWindow) -> NSTextView? {
         if let textView = window.firstResponder as? NSTextView,
            isCommandPaletteResponder(textView),
@@ -9613,6 +9621,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
            let paletteWindow = commandPaletteShortcutWindow {
             let paletteFieldEditorHasMarkedText = commandPaletteFieldEditorHasMarkedText(in: paletteWindow)
             let paletteSnapshot = mainWindowId(for: paletteWindow).map(commandPaletteSnapshot(windowId:)) ?? .empty
+            let paletteUsesInlineReturnHandling = isCommandPaletteMultilineTextResponderActive(in: paletteWindow)
             if normalizedFlags.isEmpty, event.keyCode == 53 {
                 if paletteFieldEditorHasMarkedText {
                     return false
@@ -9631,12 +9640,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 dlog(
                     "shortcut.palette.return target={\(debugWindowToken(paletteWindow))} " +
                     "mode=\(paletteSnapshot.mode) " +
+                    "inline=\(paletteUsesInlineReturnHandling ? 1 : 0) " +
                     "submit=\(shouldSubmitPalette ? 1 : 0) " +
                     "marked=\(paletteFieldEditorHasMarkedText ? 1 : 0) " +
                     "\(debugShortcutRouteSnapshot(event: event))"
                 )
             }
 #endif
+            if paletteUsesInlineReturnHandling,
+               event.keyCode == 36 || event.keyCode == 76 {
+                return false
+            }
             if shouldSubmitPalette {
                 if paletteFieldEditorHasMarkedText {
                     return false

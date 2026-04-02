@@ -4083,7 +4083,7 @@ struct ContentView: View {
         style: CommandPaletteEditorFieldStyle,
         placeholder: String,
         text: Binding<String>,
-        onSubmit: @escaping () -> Void,
+        onSubmit: @escaping (String) -> Void,
         onEscape: @escaping () -> Void,
         onInteraction: (() -> Void)? = nil
     ) -> some View {
@@ -4099,7 +4099,7 @@ struct ContentView: View {
                     onDeleteBackward?(modifiers) ?? .ignored
                 }
                 .onSubmit {
-                    onSubmit()
+                    onSubmit(text.wrappedValue)
                 }
                 .onTapGesture {
                     onInteraction?()
@@ -4129,7 +4129,7 @@ struct ContentView: View {
                 ),
                 placeholder: target.placeholder,
                 text: $commandPaletteRenameDraft,
-                onSubmit: { continueRenameFlow(target: target) },
+                onSubmit: { _ in continueRenameFlow(target: target) },
                 onEscape: { dismissCommandPalette() },
                 onInteraction: handleCommandPaletteRenameInputInteraction
             )
@@ -4216,11 +4216,8 @@ struct ContentView: View {
                 ),
                 placeholder: target.placeholder,
                 text: $commandPaletteWorkspaceDescriptionDraft,
-                onSubmit: {
-                    applyWorkspaceDescriptionFlow(
-                        target: target,
-                        proposedDescription: commandPaletteWorkspaceDescriptionDraft
-                    )
+                onSubmit: { proposedDescription in
+                    applyWorkspaceDescriptionFlow(target: target, proposedDescription: proposedDescription)
                 },
                 onEscape: { dismissCommandPalette() }
             )
@@ -4757,7 +4754,7 @@ struct ContentView: View {
         @Binding var text: String
         @Binding var isFocused: Bool
         @Binding var measuredHeight: CGFloat
-        let onSubmit: () -> Void
+        let onSubmit: (String) -> Void
         let onEscape: () -> Void
 
         final class Coordinator: NSObject, NSTextViewDelegate {
@@ -4838,7 +4835,11 @@ struct ContentView: View {
 #if DEBUG
                         dlog("palette.wsDescription.editor.handleKeyEvent action=submit")
 #endif
-                        parent.onSubmit()
+                        let currentText = editor?.string ?? parent.text
+                        if parent.text != currentText {
+                            parent.text = currentText
+                        }
+                        parent.onSubmit(currentText)
                         return true
                     }
                     if normalizedFlags == [.shift] {
