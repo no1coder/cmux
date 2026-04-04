@@ -50,6 +50,14 @@ private func cmuxTransparentWindowBaseColor() -> NSColor {
 }
 #endif
 
+private func cmuxRuntimeReadClipboardCallback(
+    _ userdata: UnsafeMutableRawPointer?,
+    _ location: ghostty_clipboard_e,
+    _ state: UnsafeMutableRawPointer?
+) -> Bool {
+    GhosttyApp.runtimeReadClipboardCallback(userdata, location, state)
+}
+
 #if DEBUG
 private func cmuxChildExitProbePath() -> String? {
     let env = ProcessInfo.processInfo.environment
@@ -975,6 +983,120 @@ class GhosttyApp {
         return URL(fileURLWithPath: "/tmp/cmux-bg.log")
     }
 
+    fileprivate static func runtimeReadClipboardCallback(
+        _ userdata: UnsafeMutableRawPointer?,
+        _ location: ghostty_clipboard_e,
+        _ state: UnsafeMutableRawPointer?
+    ) -> Bool {
+        guard let callbackContext = Self.callbackContext(from: userdata),
+              let requestSurface = callbackContext.runtimeSurface else { return false }
+
+        DispatchQueue.main.async {
+            func completeClipboardRequest(with text: String) {
+                let finish = {
+                    guard callbackContext.runtimeSurface == requestSurface else { return }
+                    text.withCString { ptr in
+                        ghostty_surface_complete_clipboard_request(requestSurface, ptr, state, false)
+                    }
+                }
+                if Thread.isMainThread {
+                    finish()
+                } else {
+                    DispatchQueue.main.async(execute: finish)
+                }
+            }
+
+            guard let pasteboard = GhosttyPasteboardHelper.pasteboard(for: location) else {
+                completeClipboardRequest(with: "")
+                return
+            }
+
+            let preparedContent = TerminalImageTransferPlanner.prepare(
+                pasteboard: pasteboard,
+                mode: .paste
+            )
+
+            switch preparedContent {
+            case .reject:
+                completeClipboardRequest(with: "")
+            case .insertText(let text):
+                completeClipboardRequest(with: text)
+            case .fileURLs(let fileURLs):
+                let operation = TerminalImageTransferOperation()
+                MainActor.assumeIsolated {
+                    callbackContext.terminalSurface?.hostedView.beginImageTransferIndicator(
+                        for: operation,
+                        onCancel: {
+                            completeClipboardRequest(with: "")
+                        }
+                    )
+                }
+
+                let target = MainActor.assumeIsolated {
+                    callbackContext.terminalSurface?.resolvedImageTransferTarget() ?? .local
+                }
+                let plan = TerminalImageTransferPlanner.plan(
+                    fileURLs: fileURLs,
+                    target: target
+                )
+
+                TerminalImageTransferPlanner.execute(
+                    plan: plan,
+                    operation: operation,
+                    uploadWorkspaceRemote: { fileURLs, operation, finish in
+                        guard let workspace = MainActor.assumeIsolated({
+                            callbackContext.terminalSurface?.owningWorkspace()
+                        }) else {
+                            finish(.failure(NSError(domain: "cmux.remote.paste", code: 3)))
+                            GhosttyPasteboardHelper.cleanupTransferredTemporaryImageFiles(fileURLs)
+                            return
+                        }
+                        workspace.uploadDroppedFilesForRemoteTerminal(
+                            fileURLs,
+                            operation: operation,
+                            completion: { result in
+                                finish(result)
+                                GhosttyPasteboardHelper.cleanupTransferredTemporaryImageFiles(fileURLs)
+                            }
+                        )
+                    },
+                    uploadDetectedSSH: { session, fileURLs, operation, finish in
+                        session.uploadDroppedFiles(
+                            fileURLs,
+                            operation: operation,
+                            completion: { result in
+                                finish(result)
+                                GhosttyPasteboardHelper.cleanupTransferredTemporaryImageFiles(fileURLs)
+                            }
+                        )
+                    },
+                    insertText: { text in
+                        MainActor.assumeIsolated {
+                            callbackContext.terminalSurface?.hostedView.endImageTransferIndicator(
+                                for: operation
+                            )
+                        }
+                        completeClipboardRequest(with: text)
+                    },
+                    onFailure: { _ in
+                        MainActor.assumeIsolated {
+                            callbackContext.terminalSurface?.hostedView.endImageTransferIndicator(
+                                for: operation
+                            )
+                        }
+                        NSSound.beep()
+#if DEBUG
+                        dlog("terminal.remotePasteUpload.failed surface=\(callbackContext.surfaceId.uuidString.prefix(5))")
+#endif
+                        completeClipboardRequest(with: "")
+                    }
+                )
+            }
+        }
+
+        return true
+    }
+
     let backgroundLogEnabled = {
         if ProcessInfo.processInfo.environment["CMUX_DEBUG_BG"] == "1" {
             return true
@@ -1152,113 +1274,17 @@ class GhosttyApp {
         runtimeConfig.action_cb = { app, target, action in
             return GhosttyApp.shared.handleAction(target: target, action: action)
         }
-        runtimeConfig.read_clipboard_cb = { userdata, location, state in
-            guard let callbackContext = GhosttyApp.callbackContext(from: userdata),
-                  let requestSurface = callbackContext.runtimeSurface else { return }
-
-            DispatchQueue.main.async {
-                func completeClipboardRequest(with text: String) {
-                    let finish = {
-                        guard callbackContext.runtimeSurface == requestSurface else { return }
-                        text.withCString { ptr in
-                            ghostty_surface_complete_clipboard_request(requestSurface, ptr, state, false)
-                        }
-                    }
-                    if Thread.isMainThread {
-                        finish()
-                    } else {
-                        DispatchQueue.main.async(execute: finish)
-                    }
-                }
-
-                guard let pasteboard = GhosttyPasteboardHelper.pasteboard(for: location) else {
-                    completeClipboardRequest(with: "")
-                    return
-                }
-
-                let preparedContent = TerminalImageTransferPlanner.prepare(
-                    pasteboard: pasteboard,
-                    mode: .paste
-                )
-
-                switch preparedContent {
-                case .reject:
-                    completeClipboardRequest(with: "")
-                case .insertText(let text):
-                    completeClipboardRequest(with: text)
-                case .fileURLs(let fileURLs):
-                    let operation = TerminalImageTransferOperation()
-                    MainActor.assumeIsolated {
-                        callbackContext.terminalSurface?.hostedView.beginImageTransferIndicator(
-                            for: operation,
-                            onCancel: {
-                                completeClipboardRequest(with: "")
-                            }
-                        )
-                    }
-
-                    let target = MainActor.assumeIsolated {
-                        callbackContext.terminalSurface?.resolvedImageTransferTarget() ?? .local
-                    }
-                    let plan = TerminalImageTransferPlanner.plan(
-                        fileURLs: fileURLs,
-                        target: target
-                    )
-
-                    TerminalImageTransferPlanner.execute(
-                        plan: plan,
-                        operation: operation,
-                        uploadWorkspaceRemote: { fileURLs, operation, finish in
-                            guard let workspace = MainActor.assumeIsolated({
-                                callbackContext.terminalSurface?.owningWorkspace()
-                            }) else {
-                                finish(.failure(NSError(domain: "cmux.remote.paste", code: 3)))
-                                GhosttyPasteboardHelper.cleanupTransferredTemporaryImageFiles(fileURLs)
-                                return
-                            }
-                            workspace.uploadDroppedFilesForRemoteTerminal(
-                                fileURLs,
-                                operation: operation,
-                                completion: { result in
-                                    finish(result)
-                                    GhosttyPasteboardHelper.cleanupTransferredTemporaryImageFiles(fileURLs)
-                                }
-                            )
-                        },
-                        uploadDetectedSSH: { session, fileURLs, operation, finish in
-                            session.uploadDroppedFiles(
-                                fileURLs,
-                                operation: operation,
-                                completion: { result in
-                                    finish(result)
-                                    GhosttyPasteboardHelper.cleanupTransferredTemporaryImageFiles(fileURLs)
-                                }
-                            )
-                        },
-                        insertText: { text in
-                            MainActor.assumeIsolated {
-                                callbackContext.terminalSurface?.hostedView.endImageTransferIndicator(
-                                    for: operation
-                                )
-                            }
-                            completeClipboardRequest(with: text)
-                        },
-                        onFailure: { _ in
-                            MainActor.assumeIsolated {
-                                callbackContext.terminalSurface?.hostedView.endImageTransferIndicator(
-                                    for: operation
-                                )
-                            }
-                            NSSound.beep()
-#if DEBUG
-                            dlog("terminal.remotePasteUpload.failed surface=\(callbackContext.surfaceId.uuidString.prefix(5))")
-#endif
-                            completeClipboardRequest(with: "")
-                        }
-                    )
-                }
-            }
-        }
+        // Some GhosttyKit builds import this callback as returning `Void` in Swift even
+        // though the C ABI returns `bool`. Store the C-compatible shim explicitly so the
+        // project compiles against both importer variants.
+        runtimeConfig.read_clipboard_cb = unsafeBitCast(
+            cmuxRuntimeReadClipboardCallback as @convention(c) (
+                UnsafeMutableRawPointer?,
+                ghostty_clipboard_e,
+                UnsafeMutableRawPointer?
+            ) -> Bool,
+            to: ghostty_runtime_read_clipboard_cb.self
+        )
         runtimeConfig.confirm_read_clipboard_cb = { userdata, content, state, _ in
             guard let content else { return }
             guard let callbackContext = GhosttyApp.callbackContext(from: userdata),
