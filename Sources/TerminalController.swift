@@ -545,6 +545,19 @@ class TerminalController {
         }
     }
 
+    nonisolated static func parseRemotePortScanKickReason(
+        _ rawReason: String
+    ) -> WorkspaceRemoteSessionController.PortScanKickReason? {
+        switch rawReason.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "command", "running", "foreground", "start":
+            return .command
+        case "refresh", "prompt", "idle":
+            return .refresh
+        default:
+            return nil
+        }
+    }
+
     /// Update which window's TabManager receives socket commands.
     /// This is used when the user switches between multiple terminal windows.
     func setActiveTabManager(_ tabManager: TabManager?) {
@@ -2148,6 +2161,10 @@ class TerminalController {
             return v2Result(id: id, self.v2SurfaceSendText(params: params))
         case "surface.send_key":
             return v2Result(id: id, self.v2SurfaceSendKey(params: params))
+        case "surface.report_tty":
+            return v2Result(id: id, self.v2SurfaceReportTTY(params: params))
+        case "surface.ports_kick":
+            return v2Result(id: id, self.v2SurfacePortsKick(params: params))
         case "surface.clear_history":
             return v2Result(id: id, self.v2SurfaceClearHistory(params: params))
         case "surface.trigger_flash":
@@ -2490,6 +2507,8 @@ class TerminalController {
             "debug.terminals",
             "surface.send_text",
             "surface.send_key",
+            "surface.report_tty",
+            "surface.ports_kick",
             "surface.read_text",
             "surface.clear_history",
             "surface.trigger_flash",
@@ -2918,6 +2937,7 @@ class TerminalController {
             "ref": v2Ref(kind: .workspace, uuid: workspace.id),
             "index": index,
             "title": workspace.title,
+            "description": v2OrNull(workspace.customDescription),
             "selected": selected,
             "pinned": workspace.isPinned,
             "panes": panes
@@ -3300,6 +3320,29 @@ class TerminalController {
 
     // MARK: - V2 Workspace Methods
 
+    private func v2WorkspaceSummaryPayload(
+        workspace: Workspace,
+        index: Int?,
+        selected: Bool
+    ) -> [String: Any] {
+        var payload: [String: Any] = [
+            "id": workspace.id.uuidString,
+            "ref": v2Ref(kind: .workspace, uuid: workspace.id),
+            "title": workspace.title,
+            "description": v2OrNull(workspace.customDescription),
+            "selected": selected,
+            "pinned": workspace.isPinned,
+            "listening_ports": workspace.listeningPorts,
+            "remote": workspace.remoteStatusPayload(),
+            "current_directory": v2OrNull(workspace.currentDirectory),
+            "custom_color": v2OrNull(workspace.customColor)
+        ]
+        if let index {
+            payload["index"] = index
+        }
+        return payload
+    }
+
     private func v2WorkspaceList(params: [String: Any]) -> V2CallResult {
         guard let tabManager = v2ResolveTabManager(params: params) else {
             return .err(code: "unavailable", message: "TabManager not available", data: nil)
@@ -3308,18 +3351,11 @@ class TerminalController {
         var workspaces: [[String: Any]] = []
         v2MainSync {
             workspaces = tabManager.tabs.enumerated().map { index, ws in
-                return [
-                    "id": ws.id.uuidString,
-                    "ref": v2Ref(kind: .workspace, uuid: ws.id),
-                    "index": index,
-                    "title": ws.title,
-                    "selected": ws.id == tabManager.selectedTabId,
-                    "pinned": ws.isPinned,
-                    "listening_ports": ws.listeningPorts,
-                    "remote": ws.remoteStatusPayload(),
-                    "current_directory": v2OrNull(ws.currentDirectory),
-                    "custom_color": v2OrNull(ws.customColor)
-                ]
+                v2WorkspaceSummaryPayload(
+                    workspace: ws,
+                    index: index,
+                    selected: ws.id == tabManager.selectedTabId
+                )
             }
         }
 
@@ -3361,6 +3397,7 @@ class TerminalController {
 
         let requestedTitle = v2RawString(params, "title")?.trimmingCharacters(in: .whitespacesAndNewlines)
         let title = (requestedTitle?.isEmpty == false) ? requestedTitle : nil
+        let description = v2RawString(params, "description")
 
         var newId: UUID?
         let shouldFocus = v2FocusAllowed()
@@ -3373,6 +3410,7 @@ class TerminalController {
                 select: shouldFocus,
                 eagerLoadTerminal: !shouldFocus
             )
+            ws.setCustomDescription(description)
             newId = ws.id
         }
 
@@ -3430,15 +3468,12 @@ class TerminalController {
         v2MainSync {
             wsId = tabManager.selectedTabId
             if let wsId, let workspace = tabManager.tabs.first(where: { $0.id == wsId }) {
-                wsPayload = [
-                    "id": workspace.id.uuidString,
-                    "ref": v2Ref(kind: .workspace, uuid: workspace.id),
-                    "title": workspace.title,
-                    "selected": true,
-                    "pinned": workspace.isPinned,
-                    "listening_ports": workspace.listeningPorts,
-                    "remote": workspace.remoteStatusPayload(),
-                ]
+                let index = tabManager.tabs.firstIndex(where: { $0.id == wsId })
+                wsPayload = v2WorkspaceSummaryPayload(
+                    workspace: workspace,
+                    index: index,
+                    selected: true
+                )
             }
         }
         guard let wsId else {
@@ -4030,6 +4065,211 @@ class TerminalController {
         return result
     }
 
+    private func v2SurfaceReportTTY(params: [String: Any]) -> V2CallResult {
+        guard let workspaceId = v2UUID(params, "workspace_id") else {
+            return .err(code: "invalid_params", message: "Missing or invalid workspace_id", data: nil)
+        }
+        let requestedSurfaceId = v2UUID(params, "surface_id")
+        if v2HasNonNullParam(params, "surface_id"), requestedSurfaceId == nil {
+            return .err(code: "invalid_params", message: "Missing or invalid surface_id", data: nil)
+        }
+        guard let ttyName = v2RawString(params, "tty_name")?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !ttyName.isEmpty else {
+            return .err(code: "invalid_params", message: "Missing tty_name", data: nil)
+        }
+
+        var result: V2CallResult = .err(
+            code: "not_found",
+            message: "Workspace not found",
+            data: [
+                "workspace_id": workspaceId.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: workspaceId),
+                "surface_id": v2OrNull(requestedSurfaceId?.uuidString),
+                "surface_ref": v2Ref(kind: .surface, uuid: requestedSurfaceId),
+            ]
+        )
+
+        v2MainSync {
+            guard let tab = self.tabForSidebarMutation(id: workspaceId) else {
+                return
+            }
+            let validSurfaceIds = Set(tab.panels.keys)
+            tab.pruneSurfaceMetadata(validSurfaceIds: validSurfaceIds)
+
+            let surfaceId = self.resolveReportedSurfaceId(
+                in: tab,
+                requestedSurfaceId: requestedSurfaceId,
+                validSurfaceIds: validSurfaceIds
+            )
+            guard let surfaceId, validSurfaceIds.contains(surfaceId) else {
+                if tab.isRemoteWorkspace, validSurfaceIds.isEmpty {
+                    tab.rememberPendingRemoteSurfaceTTY(ttyName, requestedSurfaceId: requestedSurfaceId)
+                    result = .ok([
+                        "workspace_id": workspaceId.uuidString,
+                        "workspace_ref": v2Ref(kind: .workspace, uuid: workspaceId),
+                        "surface_id": v2OrNull(requestedSurfaceId?.uuidString),
+                        "surface_ref": v2Ref(kind: .surface, uuid: requestedSurfaceId),
+                        "tty_name": ttyName,
+                        "pending": true,
+                    ])
+                    return
+                }
+                result = .err(
+                    code: "not_found",
+                    message: "Surface not found",
+                    data: [
+                        "workspace_id": workspaceId.uuidString,
+                        "workspace_ref": v2Ref(kind: .workspace, uuid: workspaceId),
+                        "surface_id": v2OrNull(requestedSurfaceId?.uuidString),
+                        "surface_ref": v2Ref(kind: .surface, uuid: requestedSurfaceId),
+                    ]
+                )
+                return
+            }
+
+            tab.surfaceTTYNames[surfaceId] = ttyName
+            if tab.isRemoteWorkspace {
+                tab.syncRemotePortScanTTYs()
+                _ = tab.applyPendingRemoteSurfacePortKickIfNeeded(to: surfaceId)
+            } else {
+                PortScanner.shared.registerTTY(workspaceId: workspaceId, panelId: surfaceId, ttyName: ttyName)
+            }
+
+            result = .ok([
+                "workspace_id": workspaceId.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: workspaceId),
+                "surface_id": surfaceId.uuidString,
+                "surface_ref": v2Ref(kind: .surface, uuid: surfaceId),
+                "tty_name": ttyName,
+            ])
+        }
+
+        return result
+    }
+
+    private func v2SurfacePortsKick(params: [String: Any]) -> V2CallResult {
+        guard let workspaceId = v2UUID(params, "workspace_id") else {
+            return .err(code: "invalid_params", message: "Missing or invalid workspace_id", data: nil)
+        }
+        let requestedSurfaceId = v2UUID(params, "surface_id")
+        if v2HasNonNullParam(params, "surface_id"), requestedSurfaceId == nil {
+            return .err(code: "invalid_params", message: "Missing or invalid surface_id", data: nil)
+        }
+        let reason: WorkspaceRemoteSessionController.PortScanKickReason
+        if let rawReason = v2RawString(params, "reason") {
+            guard let parsedReason = Self.parseRemotePortScanKickReason(rawReason) else {
+                return .err(
+                    code: "invalid_params",
+                    message: "reason must be command or refresh",
+                    data: nil
+                )
+            }
+            reason = parsedReason
+        } else {
+            reason = .command
+        }
+
+        var result: V2CallResult = .err(
+            code: "not_found",
+            message: "Workspace not found",
+            data: [
+                "workspace_id": workspaceId.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: workspaceId),
+                "surface_id": v2OrNull(requestedSurfaceId?.uuidString),
+                "surface_ref": v2Ref(kind: .surface, uuid: requestedSurfaceId),
+            ]
+        )
+
+        v2MainSync {
+            guard let tab = self.tabForSidebarMutation(id: workspaceId) else {
+                return
+            }
+            let validSurfaceIds = Set(tab.panels.keys)
+            tab.pruneSurfaceMetadata(validSurfaceIds: validSurfaceIds)
+
+            let surfaceId = self.resolveReportedSurfaceId(
+                in: tab,
+                requestedSurfaceId: requestedSurfaceId,
+                validSurfaceIds: validSurfaceIds
+            )
+            guard let surfaceId, validSurfaceIds.contains(surfaceId) else {
+                if tab.isRemoteWorkspace, validSurfaceIds.isEmpty {
+                    tab.rememberPendingRemoteSurfacePortKick(
+                        reason: reason,
+                        requestedSurfaceId: requestedSurfaceId
+                    )
+                    result = .ok([
+                        "workspace_id": workspaceId.uuidString,
+                        "workspace_ref": v2Ref(kind: .workspace, uuid: workspaceId),
+                        "surface_id": v2OrNull(requestedSurfaceId?.uuidString),
+                        "surface_ref": v2Ref(kind: .surface, uuid: requestedSurfaceId),
+                        "reason": reason.rawValue,
+                        "pending": true,
+                    ])
+                    return
+                }
+                result = .err(
+                    code: "not_found",
+                    message: "Surface not found",
+                    data: [
+                        "workspace_id": workspaceId.uuidString,
+                        "workspace_ref": v2Ref(kind: .workspace, uuid: workspaceId),
+                        "surface_id": v2OrNull(requestedSurfaceId?.uuidString),
+                        "surface_ref": v2Ref(kind: .surface, uuid: requestedSurfaceId),
+                    ]
+                )
+                return
+            }
+
+            if tab.isRemoteWorkspace {
+                tab.kickRemotePortScan(panelId: surfaceId, reason: reason)
+            } else {
+                PortScanner.shared.kick(workspaceId: workspaceId, panelId: surfaceId)
+            }
+
+            result = .ok([
+                "workspace_id": workspaceId.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: workspaceId),
+                "surface_id": surfaceId.uuidString,
+                "surface_ref": v2Ref(kind: .surface, uuid: surfaceId),
+                "reason": reason.rawValue,
+            ])
+        }
+
+        return result
+    }
+
+    @MainActor
+    private func resolveReportedSurfaceId(
+        in workspace: Workspace,
+        requestedSurfaceId: UUID?,
+        validSurfaceIds: Set<UUID>
+    ) -> UUID? {
+        if let requestedSurfaceId {
+            guard validSurfaceIds.contains(requestedSurfaceId) else { return nil }
+            return requestedSurfaceId
+        }
+
+        if let focusedSurfaceId = workspace.focusedPanelId,
+           validSurfaceIds.contains(focusedSurfaceId),
+           (!workspace.isRemoteWorkspace || workspace.isRemoteTerminalSurface(focusedSurfaceId)) {
+            return focusedSurfaceId
+        }
+
+        guard workspace.isRemoteWorkspace else { return nil }
+
+        let remoteTerminalSurfaceIds = validSurfaceIds.filter { workspace.isRemoteTerminalSurface($0) }
+        if remoteTerminalSurfaceIds.count == 1 {
+            return remoteTerminalSurfaceIds.first
+        }
+
+        if validSurfaceIds.count == 1 {
+            return validSurfaceIds.first
+        }
+
+        return nil
+    }
+
     private func v2WorkspaceAction(params: [String: Any]) -> V2CallResult {
         guard let tabManager = v2ResolveTabManager(params: params) else {
             return .err(code: "unavailable", message: "TabManager not available", data: nil)
@@ -4040,6 +4280,7 @@ class TerminalController {
 
         let supportedActions = [
             "pin", "unpin", "rename", "clear_name",
+            "set_description", "clear_description",
             "move_up", "move_down", "move_top",
             "close_others", "close_above", "close_below",
             "mark_read", "mark_unread",
@@ -4112,6 +4353,19 @@ class TerminalController {
             case "clear_name":
                 tabManager.clearCustomTitle(tabId: workspace.id)
                 finish(["title": workspace.title])
+
+            case "set_description":
+                guard let descriptionRaw = v2String(params, "description"),
+                      !descriptionRaw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    result = .err(code: "invalid_params", message: "Missing or invalid description", data: nil)
+                    return
+                }
+                tabManager.setCustomDescription(tabId: workspace.id, description: descriptionRaw)
+                finish(["description": v2OrNull(workspace.customDescription)])
+
+            case "clear_description":
+                tabManager.clearCustomDescription(tabId: workspace.id)
+                finish(["description": NSNull()])
 
             case "move_up":
                 guard let currentIndex = tabManager.tabs.firstIndex(where: { $0.id == workspace.id }) else {
@@ -4639,13 +4893,11 @@ class TerminalController {
                 result = .err(code: "not_found", message: "Workspace not found", data: nil)
                 return
             }
-            let targetSurfaceId: UUID? = v2UUID(params, "surface_id") ?? ws.focusedPanelId
-            guard let targetSurfaceId else {
+            let requestedSurfaceId: UUID? = v2UUID(params, "surface_id")
+            // Fall back to focused surface if the requested surface no longer exists (e.g. closed teammate pane)
+            let targetSurfaceId: UUID? = requestedSurfaceId.flatMap({ ws.panels[$0] != nil ? $0 : nil }) ?? ws.focusedPanelId
+            guard let targetSurfaceId, ws.panels[targetSurfaceId] != nil else {
                 result = .err(code: "not_found", message: "No focused surface", data: nil)
-                return
-            }
-            guard ws.panels[targetSurfaceId] != nil else {
-                result = .err(code: "not_found", message: "Surface not found", data: ["surface_id": targetSurfaceId.uuidString])
                 return
             }
 
@@ -5444,15 +5696,14 @@ class TerminalController {
                 result = .err(code: "invalid_params", message: "Surface is not a terminal", data: ["surface_id": surfaceId.uuidString])
                 return
             }
-            guard let surface = waitForTerminalSurface(terminalPanel, waitUpTo: 2.0) else {
-                result = .err(code: "internal_error", message: "Surface not ready", data: ["surface_id": surfaceId.uuidString])
-                return
-            }
-            guard sendNamedKey(surface, keyName: key) else {
+            let surfaceWasReady = terminalPanel.surface.surface != nil
+            guard terminalPanel.surface.sendNamedKey(key) else {
                 result = .err(code: "invalid_params", message: "Unknown key", data: ["key": key])
                 return
             }
-            terminalPanel.surface.forceRefresh(reason: "terminalController.v2SurfaceSendKey")
+            if surfaceWasReady {
+                terminalPanel.surface.forceRefresh(reason: "terminalController.v2SurfaceSendKey")
+            }
             result = .ok(["workspace_id": ws.id.uuidString, "workspace_ref": v2Ref(kind: .workspace, uuid: ws.id), "surface_id": surfaceId.uuidString, "surface_ref": v2Ref(kind: .surface, uuid: surfaceId), "window_id": v2OrNull(v2ResolveWindowId(tabManager: tabManager)?.uuidString), "window_ref": v2Ref(kind: .window, uuid: v2ResolveWindowId(tabManager: tabManager))])
         }
         return result
@@ -11137,7 +11388,7 @@ class TerminalController {
           clear_pr [--tab=X] [--panel=Y] - Clear pull request
           report_ports <port1> [port2...] [--tab=X] [--panel=Y] - Report listening ports
           report_tty <tty_name> [--tab=X] [--panel=Y] - Register TTY for batched port scanning
-          ports_kick [--tab=X] [--panel=Y] - Request batched port scan for panel
+          ports_kick [--tab=X] [--panel=Y] [--reason=command|refresh] - Request batched port scan for panel
           report_shell_state <prompt|running> [--tab=X] [--panel=Y] - Report whether the shell is idle at a prompt or running a command
           report_pwd <path> [--tab=X] [--panel=Y] - Report current working directory
           clear_ports [--tab=X] [--panel=Y] - Clear listening ports
@@ -13311,154 +13562,6 @@ class TerminalController {
         }
     }
 
-    private func keycodeForLetter(_ letter: Character) -> UInt32? {
-        switch String(letter).lowercased() {
-        case "a": return UInt32(kVK_ANSI_A)
-        case "b": return UInt32(kVK_ANSI_B)
-        case "c": return UInt32(kVK_ANSI_C)
-        case "d": return UInt32(kVK_ANSI_D)
-        case "e": return UInt32(kVK_ANSI_E)
-        case "f": return UInt32(kVK_ANSI_F)
-        case "g": return UInt32(kVK_ANSI_G)
-        case "h": return UInt32(kVK_ANSI_H)
-        case "i": return UInt32(kVK_ANSI_I)
-        case "j": return UInt32(kVK_ANSI_J)
-        case "k": return UInt32(kVK_ANSI_K)
-        case "l": return UInt32(kVK_ANSI_L)
-        case "m": return UInt32(kVK_ANSI_M)
-        case "n": return UInt32(kVK_ANSI_N)
-        case "o": return UInt32(kVK_ANSI_O)
-        case "p": return UInt32(kVK_ANSI_P)
-        case "q": return UInt32(kVK_ANSI_Q)
-        case "r": return UInt32(kVK_ANSI_R)
-        case "s": return UInt32(kVK_ANSI_S)
-        case "t": return UInt32(kVK_ANSI_T)
-        case "u": return UInt32(kVK_ANSI_U)
-        case "v": return UInt32(kVK_ANSI_V)
-        case "w": return UInt32(kVK_ANSI_W)
-        case "x": return UInt32(kVK_ANSI_X)
-        case "y": return UInt32(kVK_ANSI_Y)
-        case "z": return UInt32(kVK_ANSI_Z)
-        default: return nil
-        }
-    }
-
-    private func keycodeForNamedKey(_ name: String) -> UInt32? {
-        switch name {
-        case "enter", "return": return UInt32(kVK_Return)
-        case "tab": return UInt32(kVK_Tab)
-        case "escape", "esc": return UInt32(kVK_Escape)
-        case "backspace": return UInt32(kVK_Delete)
-        case "delete": return UInt32(kVK_ForwardDelete)
-        case "space": return UInt32(kVK_Space)
-        case "up": return UInt32(kVK_UpArrow)
-        case "down": return UInt32(kVK_DownArrow)
-        case "left": return UInt32(kVK_LeftArrow)
-        case "right": return UInt32(kVK_RightArrow)
-        case "\\": return UInt32(kVK_ANSI_Backslash)
-        default: return nil
-        }
-    }
-
-    private func sendNamedKey(_ surface: ghostty_surface_t, keyName: String) -> Bool {
-        switch keyName.lowercased() {
-        case "ctrl-c", "ctrl+c", "sigint":
-            sendKeyEvent(surface: surface, keycode: UInt32(kVK_ANSI_C), mods: GHOSTTY_MODS_CTRL)
-            return true
-        case "ctrl-d", "ctrl+d", "eof":
-            sendKeyEvent(surface: surface, keycode: UInt32(kVK_ANSI_D), mods: GHOSTTY_MODS_CTRL)
-            return true
-        case "ctrl-z", "ctrl+z", "sigtstp":
-            sendKeyEvent(surface: surface, keycode: UInt32(kVK_ANSI_Z), mods: GHOSTTY_MODS_CTRL)
-            return true
-        case "ctrl-\\", "ctrl+\\", "sigquit":
-            sendKeyEvent(surface: surface, keycode: UInt32(kVK_ANSI_Backslash), mods: GHOSTTY_MODS_CTRL)
-            return true
-        case "enter", "return":
-            sendKeyEvent(surface: surface, keycode: UInt32(kVK_Return))
-            return true
-        case "tab":
-            sendKeyEvent(surface: surface, keycode: UInt32(kVK_Tab))
-            return true
-        case "escape", "esc":
-            sendKeyEvent(surface: surface, keycode: UInt32(kVK_Escape))
-            return true
-        case "backspace":
-            sendKeyEvent(surface: surface, keycode: UInt32(kVK_Delete))
-            return true
-        case "up", "arrow_up", "arrowup":
-            sendKeyEvent(surface: surface, keycode: UInt32(kVK_UpArrow))
-            return true
-        case "down", "arrow_down", "arrowdown":
-            sendKeyEvent(surface: surface, keycode: UInt32(kVK_DownArrow))
-            return true
-        case "left", "arrow_left", "arrowleft":
-            sendKeyEvent(surface: surface, keycode: UInt32(kVK_LeftArrow))
-            return true
-        case "right", "arrow_right", "arrowright":
-            sendKeyEvent(surface: surface, keycode: UInt32(kVK_RightArrow))
-            return true
-        case "shift+tab", "shift-tab", "backtab":
-            sendKeyEvent(surface: surface, keycode: UInt32(kVK_Tab), mods: GHOSTTY_MODS_SHIFT)
-            return true
-        case "home":
-            sendKeyEvent(surface: surface, keycode: UInt32(kVK_Home))
-            return true
-        case "end":
-            sendKeyEvent(surface: surface, keycode: UInt32(kVK_End))
-            return true
-        case "delete", "del", "forward_delete":
-            sendKeyEvent(surface: surface, keycode: UInt32(kVK_ForwardDelete))
-            return true
-        case "pageup", "page_up":
-            sendKeyEvent(surface: surface, keycode: UInt32(kVK_PageUp))
-            return true
-        case "pagedown", "page_down":
-            sendKeyEvent(surface: surface, keycode: UInt32(kVK_PageDown))
-            return true
-        default:
-            // Parse modifier+key combinations (e.g. "ctrl+enter", "shift+tab",
-            // "ctrl+shift+a") or standalone named keys (e.g. "space", "up").
-            // Separators: '+' or '-'.
-            let parts = keyName.lowercased().split(separator: "+").flatMap { $0.split(separator: "-") }.map(String.init).filter { !$0.isEmpty }
-            guard let baseKey = parts.last else { return false }
-
-            // Single named key without modifiers (e.g. "space", "up", "delete")
-            if parts.count == 1 {
-                if let keycode = keycodeForNamedKey(baseKey) {
-                    sendKeyEvent(surface: surface, keycode: keycode)
-                    return true
-                }
-                if baseKey.count == 1, let char = baseKey.first, let keycode = keycodeForLetter(char) {
-                    sendKeyEvent(surface: surface, keycode: keycode)
-                    return true
-                }
-                return false
-            }
-
-            var mods = GHOSTTY_MODS_NONE
-            for mod in parts.dropLast() {
-                switch mod {
-                case "ctrl", "control": mods = ghostty_input_mods_e(rawValue: mods.rawValue | GHOSTTY_MODS_CTRL.rawValue)
-                case "shift": mods = ghostty_input_mods_e(rawValue: mods.rawValue | GHOSTTY_MODS_SHIFT.rawValue)
-                case "alt", "opt", "option": mods = ghostty_input_mods_e(rawValue: mods.rawValue | GHOSTTY_MODS_ALT.rawValue)
-                case "cmd", "command", "super": mods = ghostty_input_mods_e(rawValue: mods.rawValue | GHOSTTY_MODS_SUPER.rawValue)
-                default: return false
-                }
-            }
-
-            if let keycode = keycodeForNamedKey(baseKey) {
-                sendKeyEvent(surface: surface, keycode: keycode, mods: mods)
-                return true
-            }
-            if baseKey.count == 1, let char = baseKey.first, let keycode = keycodeForLetter(char) {
-                sendKeyEvent(surface: surface, keycode: keycode, mods: mods)
-                return true
-            }
-            return false
-        }
-    }
-
     private func sendInput(_ text: String) -> String {
         guard let tabManager = tabManager else { return "ERROR: TabManager not available" }
 
@@ -13660,16 +13763,7 @@ class TerminalController {
                 return
             }
 
-            guard let surface = resolveTerminalSurface(
-                from: terminalPanel.id.uuidString,
-                tabManager: tabManager,
-                waitUpTo: 2.0
-            ) else {
-                error = "ERROR: Surface not ready"
-                return
-            }
-
-            success = sendNamedKey(surface, keyName: keyName)
+            success = terminalPanel.surface.sendNamedKey(keyName)
         }
         if let error { return error }
         return success ? "OK" : "ERROR: Unknown key '\(keyName)'"
@@ -13686,15 +13780,11 @@ class TerminalController {
         var success = false
         var error: String?
         DispatchQueue.main.sync {
-            guard resolveTerminalPanel(from: target, tabManager: tabManager) != nil else {
+            guard let terminalPanel = resolveTerminalPanel(from: target, tabManager: tabManager) else {
                 error = "ERROR: Surface not found"
                 return
             }
-            guard let surface = resolveTerminalSurface(from: target, tabManager: tabManager, waitUpTo: 2.0) else {
-                error = "ERROR: Surface not ready"
-                return
-            }
-            success = sendNamedKey(surface, keyName: keyName)
+            success = terminalPanel.surface.sendNamedKey(keyName)
         }
 
         if let error { return error }
@@ -15252,7 +15342,12 @@ class TerminalController {
                 tab.pruneSurfaceMetadata(validSurfaceIds: validSurfaceIds)
                 guard validSurfaceIds.contains(scope.panelId) else { return }
                 tab.surfaceTTYNames[scope.panelId] = ttyName
-                PortScanner.shared.registerTTY(workspaceId: scope.workspaceId, panelId: scope.panelId, ttyName: ttyName)
+                if tab.isRemoteWorkspace {
+                    tab.syncRemotePortScanTTYs()
+                    _ = tab.applyPendingRemoteSurfacePortKickIfNeeded(to: scope.panelId)
+                } else {
+                    PortScanner.shared.registerTTY(workspaceId: scope.workspaceId, panelId: scope.panelId, ttyName: ttyName)
+                }
             }
             return "OK"
         }
@@ -15291,13 +15386,28 @@ class TerminalController {
             }
 
             tab.surfaceTTYNames[surfaceId] = ttyName
-            PortScanner.shared.registerTTY(workspaceId: tab.id, panelId: surfaceId, ttyName: ttyName)
+            if tab.isRemoteWorkspace {
+                tab.syncRemotePortScanTTYs()
+                _ = tab.applyPendingRemoteSurfacePortKickIfNeeded(to: surfaceId)
+            } else {
+                PortScanner.shared.registerTTY(workspaceId: tab.id, panelId: surfaceId, ttyName: ttyName)
+            }
         }
         return result
     }
 
     private func portsKick(_ args: String) -> String {
         let parsed = parseOptions(args)
+        let reason: WorkspaceRemoteSessionController.PortScanKickReason
+        if let rawReason = parsed.options["reason"], !rawReason.isEmpty {
+            guard let parsedReason = Self.parseRemotePortScanKickReason(rawReason) else {
+                return "ERROR: Invalid ports_kick reason '\(rawReason)' — expected command or refresh"
+            }
+            reason = parsedReason
+        } else {
+            reason = .command
+        }
+
         if let scope = Self.explicitSocketScope(options: parsed.options) {
             DispatchQueue.main.async {
                 guard let tabManager = AppDelegate.shared?.tabManagerFor(tabId: scope.workspaceId),
@@ -15307,7 +15417,11 @@ class TerminalController {
                 let validSurfaceIds = Set(tab.panels.keys)
                 tab.pruneSurfaceMetadata(validSurfaceIds: validSurfaceIds)
                 guard validSurfaceIds.contains(scope.panelId) else { return }
-                PortScanner.shared.kick(workspaceId: scope.workspaceId, panelId: scope.panelId)
+                if tab.isRemoteWorkspace {
+                    tab.kickRemotePortScan(panelId: scope.panelId, reason: reason)
+                } else {
+                    PortScanner.shared.kick(workspaceId: scope.workspaceId, panelId: scope.panelId)
+                }
             }
             return "OK"
         }
@@ -15339,7 +15453,11 @@ class TerminalController {
                 surfaceId = focused
             }
 
-            PortScanner.shared.kick(workspaceId: tab.id, panelId: surfaceId)
+            if tab.isRemoteWorkspace {
+                tab.kickRemotePortScan(panelId: surfaceId, reason: reason)
+            } else {
+                PortScanner.shared.kick(workspaceId: tab.id, panelId: surfaceId)
+            }
         }
         return result
     }

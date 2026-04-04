@@ -6,6 +6,7 @@ import QuartzCore
 import Combine
 import CoreText
 import Darwin
+import Carbon.HIToolbox
 import Sentry
 import Bonsplit
 import IOSurface
@@ -1147,11 +1148,10 @@ class GhosttyApp {
             return GhosttyApp.shared.handleAction(target: target, action: action)
         }
         runtimeConfig.read_clipboard_cb = { userdata, location, state in
-            guard let callbackContext = GhosttyApp.callbackContext(from: userdata) else { return }
+            guard let callbackContext = GhosttyApp.callbackContext(from: userdata),
+                  let requestSurface = callbackContext.runtimeSurface else { return false }
 
             DispatchQueue.main.async {
-                guard let requestSurface = callbackContext.runtimeSurface else { return }
-
                 func completeClipboardRequest(with text: String) {
                     let finish = {
                         guard callbackContext.runtimeSurface == requestSurface else { return }
@@ -1253,6 +1253,7 @@ class GhosttyApp {
                     )
                 }
             }
+            return true
         }
         runtimeConfig.confirm_read_clipboard_cb = { userdata, content, state, _ in
             guard let content else { return }
@@ -3016,6 +3017,26 @@ final class TerminalSurface: Identifiable, ObservableObject {
         }
     }
 
+    private struct PendingKeyEvent {
+        let keycode: UInt32
+        let mods: ghostty_input_mods_e
+        let label: String
+    }
+
+    private enum PendingSocketInput {
+        case text(Data)
+        case key(PendingKeyEvent)
+
+        var estimatedBytes: Int {
+            switch self {
+            case .text(let data):
+                return data.count
+            case .key(let event):
+                return max(event.label.utf8.count, 1)
+            }
+        }
+    }
+
     private(set) var surface: ghostty_surface_t?
     private weak var attachedView: GhosttyNSView?
 
@@ -3065,9 +3086,9 @@ final class TerminalSurface: Identifiable, ObservableObject {
     private var runtimeSurfaceCreatedAt: Date?
     private var teardownRequestedAt: Date?
     private var teardownRequestReason: String?
-    private var pendingTextQueue: [Data] = []
-    private var pendingTextBytes: Int = 0
-    private let maxPendingTextBytes = 1_048_576
+    private var pendingSocketInputQueue: [PendingSocketInput] = []
+    private var pendingSocketInputBytes: Int = 0
+    private let maxPendingSocketInputBytes = 1_048_576
     private var backgroundSurfaceStartQueued = false
     private var surfaceCallbackContext: Unmanaged<GhosttySurfaceCallbackContext>?
     /// The desired focus state for the Ghostty C surface. May be set before the
@@ -3756,6 +3777,9 @@ final class TerminalSurface: Identifiable, ObservableObject {
         if !claudeHooksEnabled {
             setManagedEnvironmentValue("CMUX_CLAUDE_HOOKS_DISABLED", "1")
         }
+        if let customClaudePath = ClaudeCodeIntegrationSettings.customClaudePath() {
+            setManagedEnvironmentValue("CMUX_CUSTOM_CLAUDE_PATH", customClaudePath)
+        }
 
         if let cliBinPath = Bundle.main.resourceURL?.appendingPathComponent("bin").path {
             let currentPath = env["PATH"]
@@ -3969,6 +3993,14 @@ final class TerminalSurface: Identifiable, ObservableObject {
         // Ghostty's default.
         ghostty_surface_set_focus(createdSurface, desiredFocusState)
 
+        flushPendingSocketInputIfNeeded()
+
+        // Kick an initial draw after creation/size setup. On some startup paths Ghostty can
+        // miss the first vsync callback and sit on a blank frame until another focus/visibility
+        // transition nudges the renderer.
+        view.forceRefreshSurface()
+        ghostty_surface_refresh(createdSurface)
+
         NotificationCenter.default.post(
             name: .terminalSurfaceDidBecomeReady,
             object: self,
@@ -3977,14 +4009,6 @@ final class TerminalSurface: Identifiable, ObservableObject {
                 "workspaceId": tabId
             ]
         )
-
-        flushPendingTextIfNeeded()
-
-        // Kick an initial draw after creation/size setup. On some startup paths Ghostty can
-        // miss the first vsync callback and sit on a blank frame until another focus/visibility
-        // transition nudges the renderer.
-        view.forceRefreshSurface()
-        ghostty_surface_refresh(createdSurface)
 
 #if DEBUG
         let runtimeFontText = cmuxCurrentSurfaceFontSizePoints(createdSurface).map {
@@ -4141,10 +4165,23 @@ final class TerminalSurface: Identifiable, ObservableObject {
     func sendText(_ text: String) {
         guard let data = text.data(using: .utf8), !data.isEmpty else { return }
         guard let surface = surface else {
-            enqueuePendingText(data)
+            enqueuePendingSocketInput(.text(data))
+            requestBackgroundSurfaceStartIfNeeded()
             return
         }
         writeTextData(data, to: surface)
+    }
+
+    @discardableResult
+    func sendNamedKey(_ keyName: String) -> Bool {
+        guard let event = pendingKeyEvent(for: keyName) else { return false }
+        if let surface = surface {
+            sendKeyEvent(surface: surface, keycode: event.keycode, mods: event.mods)
+        } else {
+            enqueuePendingSocketInput(.key(event))
+            requestBackgroundSurfaceStartIfNeeded()
+        }
+        return true
     }
 
     /// Send text with control characters (Return, Tab, etc.) delivered as key
@@ -4198,11 +4235,15 @@ final class TerminalSurface: Identifiable, ObservableObject {
         buffer.removeAll(keepingCapacity: true)
     }
 
-    private func sendKeyEvent(surface: ghostty_surface_t, keycode: UInt32) {
+    private func sendKeyEvent(
+        surface: ghostty_surface_t,
+        keycode: UInt32,
+        mods: ghostty_input_mods_e = GHOSTTY_MODS_NONE
+    ) {
         var keyEvent = ghostty_input_key_s()
         keyEvent.action = GHOSTTY_ACTION_PRESS
         keyEvent.keycode = keycode
-        keyEvent.mods = GHOSTTY_MODS_NONE
+        keyEvent.mods = mods
         keyEvent.consumed_mods = GHOSTTY_MODS_NONE
         keyEvent.unshifted_codepoint = 0
         keyEvent.composing = false
@@ -4248,37 +4289,188 @@ final class TerminalSurface: Identifiable, ObservableObject {
         }
     }
 
-    private func enqueuePendingText(_ data: Data) {
-        let incomingBytes = data.count
-        while !pendingTextQueue.isEmpty && pendingTextBytes + incomingBytes > maxPendingTextBytes {
-            let dropped = pendingTextQueue.removeFirst()
-            pendingTextBytes -= dropped.count
+    private func keycodeForLetter(_ letter: Character) -> UInt32? {
+        switch String(letter).lowercased() {
+        case "a": return UInt32(kVK_ANSI_A)
+        case "b": return UInt32(kVK_ANSI_B)
+        case "c": return UInt32(kVK_ANSI_C)
+        case "d": return UInt32(kVK_ANSI_D)
+        case "e": return UInt32(kVK_ANSI_E)
+        case "f": return UInt32(kVK_ANSI_F)
+        case "g": return UInt32(kVK_ANSI_G)
+        case "h": return UInt32(kVK_ANSI_H)
+        case "i": return UInt32(kVK_ANSI_I)
+        case "j": return UInt32(kVK_ANSI_J)
+        case "k": return UInt32(kVK_ANSI_K)
+        case "l": return UInt32(kVK_ANSI_L)
+        case "m": return UInt32(kVK_ANSI_M)
+        case "n": return UInt32(kVK_ANSI_N)
+        case "o": return UInt32(kVK_ANSI_O)
+        case "p": return UInt32(kVK_ANSI_P)
+        case "q": return UInt32(kVK_ANSI_Q)
+        case "r": return UInt32(kVK_ANSI_R)
+        case "s": return UInt32(kVK_ANSI_S)
+        case "t": return UInt32(kVK_ANSI_T)
+        case "u": return UInt32(kVK_ANSI_U)
+        case "v": return UInt32(kVK_ANSI_V)
+        case "w": return UInt32(kVK_ANSI_W)
+        case "x": return UInt32(kVK_ANSI_X)
+        case "y": return UInt32(kVK_ANSI_Y)
+        case "z": return UInt32(kVK_ANSI_Z)
+        default: return nil
         }
-
-        pendingTextQueue.append(data)
-        pendingTextBytes += incomingBytes
-        #if DEBUG
-        dlog(
-            "surface.send_text.queue surface=\(id.uuidString.prefix(8)) chunks=\(pendingTextQueue.count) bytes=\(pendingTextBytes)"
-        )
-        #endif
     }
 
-    private func flushPendingTextIfNeeded() {
-        guard let surface = surface, !pendingTextQueue.isEmpty else { return }
-        let queued = pendingTextQueue
-        let queuedBytes = pendingTextBytes
-        pendingTextQueue.removeAll(keepingCapacity: false)
-        pendingTextBytes = 0
-
-        for chunk in queued {
-            writeTextData(chunk, to: surface)
+    private func keycodeForNamedKey(_ name: String) -> UInt32? {
+        switch name {
+        case "enter", "return": return UInt32(kVK_Return)
+        case "tab": return UInt32(kVK_Tab)
+        case "escape", "esc": return UInt32(kVK_Escape)
+        case "backspace": return UInt32(kVK_Delete)
+        case "delete": return UInt32(kVK_ForwardDelete)
+        case "space": return UInt32(kVK_Space)
+        case "up": return UInt32(kVK_UpArrow)
+        case "down": return UInt32(kVK_DownArrow)
+        case "left": return UInt32(kVK_LeftArrow)
+        case "right": return UInt32(kVK_RightArrow)
+        case "\\": return UInt32(kVK_ANSI_Backslash)
+        default: return nil
         }
-        #if DEBUG
+    }
+
+    private func pendingKeyEvent(for keyName: String) -> PendingKeyEvent? {
+        let normalized = keyName.lowercased()
+        switch normalized {
+        case "ctrl-c", "ctrl+c", "sigint":
+            return PendingKeyEvent(keycode: UInt32(kVK_ANSI_C), mods: GHOSTTY_MODS_CTRL, label: normalized)
+        case "ctrl-d", "ctrl+d", "eof":
+            return PendingKeyEvent(keycode: UInt32(kVK_ANSI_D), mods: GHOSTTY_MODS_CTRL, label: normalized)
+        case "ctrl-z", "ctrl+z", "sigtstp":
+            return PendingKeyEvent(keycode: UInt32(kVK_ANSI_Z), mods: GHOSTTY_MODS_CTRL, label: normalized)
+        case "ctrl-\\", "ctrl+\\", "sigquit":
+            return PendingKeyEvent(keycode: UInt32(kVK_ANSI_Backslash), mods: GHOSTTY_MODS_CTRL, label: normalized)
+        case "enter", "return":
+            return PendingKeyEvent(keycode: UInt32(kVK_Return), mods: GHOSTTY_MODS_NONE, label: normalized)
+        case "tab":
+            return PendingKeyEvent(keycode: UInt32(kVK_Tab), mods: GHOSTTY_MODS_NONE, label: normalized)
+        case "escape", "esc":
+            return PendingKeyEvent(keycode: UInt32(kVK_Escape), mods: GHOSTTY_MODS_NONE, label: normalized)
+        case "backspace":
+            return PendingKeyEvent(keycode: UInt32(kVK_Delete), mods: GHOSTTY_MODS_NONE, label: normalized)
+        case "up", "arrow_up", "arrowup":
+            return PendingKeyEvent(keycode: UInt32(kVK_UpArrow), mods: GHOSTTY_MODS_NONE, label: normalized)
+        case "down", "arrow_down", "arrowdown":
+            return PendingKeyEvent(keycode: UInt32(kVK_DownArrow), mods: GHOSTTY_MODS_NONE, label: normalized)
+        case "left", "arrow_left", "arrowleft":
+            return PendingKeyEvent(keycode: UInt32(kVK_LeftArrow), mods: GHOSTTY_MODS_NONE, label: normalized)
+        case "right", "arrow_right", "arrowright":
+            return PendingKeyEvent(keycode: UInt32(kVK_RightArrow), mods: GHOSTTY_MODS_NONE, label: normalized)
+        case "shift+tab", "shift-tab", "backtab":
+            return PendingKeyEvent(keycode: UInt32(kVK_Tab), mods: GHOSTTY_MODS_SHIFT, label: normalized)
+        case "home":
+            return PendingKeyEvent(keycode: UInt32(kVK_Home), mods: GHOSTTY_MODS_NONE, label: normalized)
+        case "end":
+            return PendingKeyEvent(keycode: UInt32(kVK_End), mods: GHOSTTY_MODS_NONE, label: normalized)
+        case "delete", "del", "forward_delete":
+            return PendingKeyEvent(keycode: UInt32(kVK_ForwardDelete), mods: GHOSTTY_MODS_NONE, label: normalized)
+        case "pageup", "page_up":
+            return PendingKeyEvent(keycode: UInt32(kVK_PageUp), mods: GHOSTTY_MODS_NONE, label: normalized)
+        case "pagedown", "page_down":
+            return PendingKeyEvent(keycode: UInt32(kVK_PageDown), mods: GHOSTTY_MODS_NONE, label: normalized)
+        default:
+            let parts = normalized
+                .split(separator: "+")
+                .flatMap { $0.split(separator: "-") }
+                .map(String.init)
+                .filter { !$0.isEmpty }
+            guard let baseKey = parts.last else { return nil }
+
+            if parts.count == 1 {
+                if let keycode = keycodeForNamedKey(baseKey) {
+                    return PendingKeyEvent(keycode: keycode, mods: GHOSTTY_MODS_NONE, label: normalized)
+                }
+                if baseKey.count == 1,
+                   let char = baseKey.first,
+                   let keycode = keycodeForLetter(char) {
+                    return PendingKeyEvent(keycode: keycode, mods: GHOSTTY_MODS_NONE, label: normalized)
+                }
+                return nil
+            }
+
+            var mods = GHOSTTY_MODS_NONE
+            for mod in parts.dropLast() {
+                switch mod {
+                case "ctrl", "control":
+                    mods = ghostty_input_mods_e(rawValue: mods.rawValue | GHOSTTY_MODS_CTRL.rawValue)
+                case "shift":
+                    mods = ghostty_input_mods_e(rawValue: mods.rawValue | GHOSTTY_MODS_SHIFT.rawValue)
+                case "alt", "opt", "option":
+                    mods = ghostty_input_mods_e(rawValue: mods.rawValue | GHOSTTY_MODS_ALT.rawValue)
+                case "cmd", "command", "super":
+                    mods = ghostty_input_mods_e(rawValue: mods.rawValue | GHOSTTY_MODS_SUPER.rawValue)
+                default:
+                    return nil
+                }
+            }
+
+            if let keycode = keycodeForNamedKey(baseKey) {
+                return PendingKeyEvent(keycode: keycode, mods: mods, label: normalized)
+            }
+            if baseKey.count == 1,
+               let char = baseKey.first,
+               let keycode = keycodeForLetter(char) {
+                return PendingKeyEvent(keycode: keycode, mods: mods, label: normalized)
+            }
+            return nil
+        }
+    }
+
+    private func enqueuePendingSocketInput(_ input: PendingSocketInput) {
+        let incomingBytes = input.estimatedBytes
+        while !pendingSocketInputQueue.isEmpty,
+              pendingSocketInputBytes + incomingBytes > maxPendingSocketInputBytes {
+            let dropped = pendingSocketInputQueue.removeFirst()
+            pendingSocketInputBytes -= dropped.estimatedBytes
+        }
+
+        pendingSocketInputQueue.append(input)
+        pendingSocketInputBytes += incomingBytes
+#if DEBUG
+        let pendingKeys = pendingSocketInputQueue.reduce(into: 0) { count, item in
+            if case .key = item {
+                count += 1
+            }
+        }
         dlog(
-            "surface.send_text.flush surface=\(id.uuidString.prefix(8)) chunks=\(queued.count) bytes=\(queuedBytes)"
+            "surface.socket_input.queue surface=\(id.uuidString.prefix(8)) items=\(pendingSocketInputQueue.count) " +
+            "keys=\(pendingKeys) bytes=\(pendingSocketInputBytes)"
         )
-        #endif
+#endif
+    }
+
+    private func flushPendingSocketInputIfNeeded() {
+        guard let surface = surface, !pendingSocketInputQueue.isEmpty else { return }
+        let queued = pendingSocketInputQueue
+        let queuedBytes = pendingSocketInputBytes
+        pendingSocketInputQueue.removeAll(keepingCapacity: false)
+        pendingSocketInputBytes = 0
+
+        var queuedKeys = 0
+        for item in queued {
+            switch item {
+            case .text(let chunk):
+                writeTextData(chunk, to: surface)
+            case .key(let event):
+                queuedKeys += 1
+                sendKeyEvent(surface: surface, keycode: event.keycode, mods: event.mods)
+            }
+        }
+#if DEBUG
+        dlog(
+            "surface.socket_input.flush surface=\(id.uuidString.prefix(8)) items=\(queued.count) " +
+            "keys=\(queuedKeys) bytes=\(queuedBytes)"
+        )
+#endif
     }
 
     func performBindingAction(_ action: String) -> Bool {
@@ -4907,11 +5099,19 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         // The drag pasteboard can retain tab-transfer UTIs briefly after a split command
         // or other layout churn. Only defer terminal resizes while an actual drag event
         // is in flight; otherwise pre-existing panes can stay stuck at their old size.
+        // Interactive geometry resize already has an explicit fast path for sidebar and
+        // split-divider drags. Do not let stale drag-pasteboard state suppress those updates.
+        if TerminalWindowPortalRegistry.isInteractiveGeometryResizeActive {
+            return false
+        }
         guard hasTabDragPasteboardTypes() else { return false }
         return isDragResizeEvent(NSApp.currentEvent?.type)
     }
 
     private func activeSurfaceResizeDeferralReason() -> String? {
+        if inLiveResize || window?.inLiveResize == true {
+            return nil
+        }
         return Self.shouldDeferSurfaceResizeForActiveDrag() ? "tabDrag" : nil
     }
 
@@ -6052,12 +6252,22 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
 #endif
                     text.withCString { ptr in
                         keyEvent.text = ptr
-                        _ = ghostty_surface_key(surface, keyEvent)
+                        #if DEBUG
+                        _ = sendTimedGhosttyKey(
+                            surface,
+                            keyEvent,
+                            path: "terminal.keyDown.accumulatedGhosttySend",
+                            event: event,
+                            extra: "textBytes=\(text.utf8.count)"
+                        )
+                        #else
+                        _ = sendGhosttyKey(surface, keyEvent)
+                        #endif
                     }
 #if DEBUG
                     ghosttySendMs += (ProcessInfo.processInfo.systemUptime - ghosttySendStart) * 1000.0
                     CmuxTypingTiming.logDuration(
-                        path: "terminal.keyDown.accumulatedGhosttySend",
+                        path: "terminal.keyDown.accumulatedGhosttySend.total",
                         startedAt: sendTimingStart,
                         event: event,
                         extra: "textBytes=\(text.utf8.count)"
@@ -6109,8 +6319,11 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
                     event: translationEvent,
                     markedTextBefore: markedTextBefore
                 )
+            let suppressComposingFallbackText = keyEvent.composing
             if let text = textForKeyEvent(translationEvent) {
-                if shouldSendText(text), !suppressShiftSpaceFallbackText {
+                if shouldSendText(text),
+                   !suppressShiftSpaceFallbackText,
+                   !suppressComposingFallbackText {
                     shouldRefreshAfterTextInput = true
 #if DEBUG
                     let sendTimingStart = CmuxTypingTiming.start()
@@ -6118,12 +6331,22 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
 #endif
                     text.withCString { ptr in
                         keyEvent.text = ptr
-                        _ = ghostty_surface_key(surface, keyEvent)
+                        #if DEBUG
+                        _ = sendTimedGhosttyKey(
+                            surface,
+                            keyEvent,
+                            path: "terminal.keyDown.ghosttySend",
+                            event: event,
+                            extra: "textBytes=\(text.utf8.count)"
+                        )
+                        #else
+                        _ = sendGhosttyKey(surface, keyEvent)
+                        #endif
                     }
 #if DEBUG
                     ghosttySendMs += (ProcessInfo.processInfo.systemUptime - ghosttySendStart) * 1000.0
                     CmuxTypingTiming.logDuration(
-                        path: "terminal.keyDown.ghosttySend",
+                        path: "terminal.keyDown.ghosttySend.total",
                         startedAt: sendTimingStart,
                         event: event,
                         extra: "textBytes=\(text.utf8.count)"
@@ -7749,6 +7972,24 @@ final class GhosttySurfaceScrollView: NSView {
         })
 
         observers.append(NotificationCenter.default.addObserver(
+            forName: .terminalSurfaceDidBecomeReady,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self,
+                  let readySurfaceId = notification.userInfo?["surfaceId"] as? UUID,
+                  readySurfaceId == self.surfaceView.terminalSurface?.id else {
+                return
+            }
+            // Session restore can request focus before the runtime surface exists.
+            // Re-run the normal first-responder/focus path once the surface is live.
+            guard self.isActive || self.surfaceView.desiredFocus || self.isSurfaceViewFirstResponder() else {
+                return
+            }
+            self.scheduleAutomaticFirstResponderApply(reason: "surfaceDidBecomeReady")
+        })
+
+        observers.append(NotificationCenter.default.addObserver(
             forName: .ghosttyDidReceiveWheelScroll,
             object: surfaceView,
             queue: .main
@@ -9091,11 +9332,11 @@ final class GhosttySurfaceScrollView: NSView {
         }()
         let isHiddenForFocus = isHiddenOrHasHiddenAncestor || surfaceView.isHiddenOrHasHiddenAncestor
         let surfaceShort = surfaceView.terminalSurface?.id.uuidString.prefix(5) ?? "nil"
+        let surfaceOwnsFirstResponder = isSurfaceViewFirstResponder()
 
-        guard surfaceView.desiredFocus else { return }
-        guard isSurfaceViewFirstResponder() else { return }
-        guard isActive else { return }
+        guard surfaceView.desiredFocus || surfaceOwnsFirstResponder else { return }
         guard surfaceView.isVisibleInUI else { return }
+        surfaceView.terminalSurface?.recordExternalFocusState(true)
         guard let window, window.isKeyWindow else { return }
         guard !isHiddenForFocus, hasUsablePortalGeometry else {
 #if DEBUG
@@ -9107,6 +9348,15 @@ final class GhosttySurfaceScrollView: NSView {
 #endif
             scheduleAutomaticFirstResponderApply(reason: "clearSuppressReparentFocus.hiddenOrTiny")
             return
+        }
+        if !surfaceOwnsFirstResponder && !isSurfaceViewFirstResponder() {
+#if DEBUG
+            dlog(
+                "focus.reparent.resume.restoreFirstResponder surface=\(surfaceShort) " +
+                "firstResponder=\(String(describing: window.firstResponder))"
+            )
+#endif
+            guard window.makeFirstResponder(surfaceView), isSurfaceViewFirstResponder() else { return }
         }
 #if DEBUG
         dlog("focus.reparent.resume surface=\(surfaceShort) firstResponder=\(String(describing: window.firstResponder))")
@@ -9191,6 +9441,12 @@ final class GhosttySurfaceScrollView: NSView {
               matchesCurrentTerminalFocusTarget(tabId: tabId, surfaceId: panelId) else {
 #if DEBUG
             dlog("focus.apply.skip surface=\(surfaceShort) reason=stale_target")
+#endif
+            return
+        }
+        if AppDelegate.shared?.isCommandPaletteEffectivelyVisible(for: window) == true {
+#if DEBUG
+            dlog("find.applyFirstResponder SKIP surface=\(surfaceShort) reason=commandPaletteVisible")
 #endif
             return
         }

@@ -212,6 +212,28 @@ final class WorkspaceShortcutMapperTests: XCTestCase {
     }
 }
 
+@MainActor
+final class WorkspaceCustomDescriptionTests: XCTestCase {
+    func testSetCustomDescriptionPreservesMeaningfulLeadingAndTrailingWhitespace() {
+        let workspace = Workspace()
+        let description = "  line one\n\nline two\n\n"
+
+        workspace.setCustomDescription(description)
+
+        XCTAssertEqual(workspace.customDescription, description)
+        XCTAssertTrue(workspace.hasCustomDescription)
+    }
+
+    func testSetCustomDescriptionClearsWhitespaceOnlyDescriptions() {
+        let workspace = Workspace()
+
+        workspace.setCustomDescription(" \n\t \n")
+
+        XCTAssertNil(workspace.customDescription)
+        XCTAssertFalse(workspace.hasCustomDescription)
+    }
+}
+
 
 final class WorkspacePlacementSettingsTests: XCTestCase {
     func testCurrentPlacementDefaultsToAfterCurrentWhenUnset() {
@@ -1400,12 +1422,13 @@ final class WorkspaceTerminalFocusRecoveryTests: XCTestCase {
         )
 
         leftPanel.hostedView.clearSuppressReparentFocus()
-        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
-
-        XCTAssertTrue(
-            leftPanel.surface.debugDesiredFocusState(),
-            "Clearing reparent-focus suppression should reassert Ghostty focus when the surface still owns first responder"
+        let focusRecovered = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                leftPanel.surface.debugDesiredFocusState()
+            },
+            object: NSObject()
         )
+        wait(for: [focusRecovered], timeout: 1.0)
 #else
         throw XCTSkip("Debug-only regression test")
 #endif
