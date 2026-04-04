@@ -14667,7 +14667,7 @@ class TerminalController {
             return nil
         }()
 
-        scheduleSidebarMutation(target: target) { self, tab in
+        scheduleSidebarMutation(target: target) { controller, tab in
             guard Self.shouldReplaceStatusEntry(
                 current: tab.statusEntries[key],
                 key: key,
@@ -14681,7 +14681,7 @@ class TerminalController {
                 // Still update PID tracking even if the status display hasn't changed.
                 if let pidValue {
                     tab.agentPIDs[key] = pidValue
-                    self.refreshTrackedAgentPorts(for: tab)
+                    controller.refreshTrackedAgentPorts(for: tab)
                 }
                 return
             }
@@ -14697,7 +14697,7 @@ class TerminalController {
             )
             if let pidValue {
                 tab.agentPIDs[key] = pidValue
-                self.refreshTrackedAgentPorts(for: tab)
+                controller.refreshTrackedAgentPorts(for: tab)
             }
         }
         return "OK"
@@ -14714,10 +14714,10 @@ class TerminalController {
             return targetResolution.error ?? "ERROR: No tab selected"
         }
 
-        scheduleSidebarMutation(target: target) { self, tab in
+        scheduleSidebarMutation(target: target) { controller, tab in
             _ = tab.statusEntries.removeValue(forKey: key)
             if tab.agentPIDs.removeValue(forKey: key) != nil {
-                self.refreshTrackedAgentPorts(for: tab)
+                controller.refreshTrackedAgentPorts(for: tab)
             }
         }
         return "OK"
@@ -14736,9 +14736,9 @@ class TerminalController {
         guard let target = targetResolution.target else {
             return targetResolution.error ?? "ERROR: No tab selected"
         }
-        scheduleSidebarMutation(target: target) { self, tab in
+        scheduleSidebarMutation(target: target) { controller, tab in
             tab.agentPIDs[key] = pid
-            self.refreshTrackedAgentPorts(for: tab)
+            controller.refreshTrackedAgentPorts(for: tab)
         }
         return "OK"
     }
@@ -14753,9 +14753,9 @@ class TerminalController {
         guard let target = targetResolution.target else {
             return targetResolution.error ?? "ERROR: No tab selected"
         }
-        scheduleSidebarMutation(target: target) { self, tab in
+        scheduleSidebarMutation(target: target) { controller, tab in
             tab.agentPIDs.removeValue(forKey: key)
-            self.refreshTrackedAgentPorts(for: tab)
+            controller.refreshTrackedAgentPorts(for: tab)
         }
         return "OK"
     }
