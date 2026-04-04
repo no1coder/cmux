@@ -6913,7 +6913,7 @@ class TerminalController {
     }
 
     private func v2NotificationClear() -> V2CallResult {
-        DispatchQueue.main.sync {
+        DispatchQueue.main.async {
             TerminalNotificationStore.shared.clearAll()
         }
         return .ok([:])
@@ -12672,6 +12672,26 @@ class TerminalController {
         let tabArg = parts[0]
         let panelArg = parts[1]
         let payload = parts.count > 2 ? parts[2] : ""
+        let (title, subtitle, body) = parseNotificationPayload(payload)
+
+        if let workspaceId = UUID(uuidString: tabArg),
+           let panelId = UUID(uuidString: panelArg) {
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      let tab = self.tabForSidebarMutation(id: workspaceId),
+                      tab.panels[panelId] != nil else {
+                    return
+                }
+                TerminalNotificationStore.shared.addNotification(
+                    tabId: workspaceId,
+                    surfaceId: panelId,
+                    title: title,
+                    subtitle: subtitle,
+                    body: body
+                )
+            }
+            return "OK"
+        }
 
         var result = "OK"
         DispatchQueue.main.sync {
@@ -12690,7 +12710,6 @@ class TerminalController {
                 result = "ERROR: Panel not found"
                 return
             }
-            let (title, subtitle, body) = parseNotificationPayload(payload)
             TerminalNotificationStore.shared.addNotification(
                 tabId: tab.id,
                 surfaceId: panelId,
@@ -12718,7 +12737,7 @@ class TerminalController {
     private func clearNotifications(_ args: String) -> String {
         let trimmed = args.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
-            DispatchQueue.main.sync {
+            DispatchQueue.main.async {
                 TerminalNotificationStore.shared.clearAll()
             }
             return "OK"
@@ -12728,16 +12747,12 @@ class TerminalController {
               !tabOption.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return "ERROR: Usage: clear_notifications [--tab=X]"
         }
-        var tabId: UUID?
-        DispatchQueue.main.sync {
-            if let tab = resolveTabForReport(trimmed) {
-                tabId = tab.id
-            }
-        }
+        let tabResolution = resolveTabIdForSidebarMutation(reportArgs: trimmed, options: parsed.options)
+        let tabId = tabResolution.tabId
         guard let tabId else {
-            return "ERROR: Tab not found"
+            return tabResolution.error ?? "ERROR: Tab not found"
         }
-        DispatchQueue.main.sync {
+        DispatchQueue.main.async {
             TerminalNotificationStore.shared.clearNotifications(forTabId: tabId)
         }
         return "OK"
@@ -14468,6 +14483,19 @@ class TerminalController {
         reportArgs: String,
         options: [String: String]
     ) -> (tabId: UUID?, error: String?) {
+        if let rawTabArg = options["tab"] {
+            let tabArg = rawTabArg.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !tabArg.isEmpty else {
+                return (nil, "ERROR: Tab not found")
+            }
+            if let tabId = UUID(uuidString: tabArg) {
+                // Telemetry/socket mutations commonly pass an explicit workspace UUID.
+                // Accept it directly so the socket handler doesn't block on main-thread
+                // layout stalls before it can enqueue the mutation.
+                return (tabId, nil)
+            }
+        }
+
         var tabId: UUID?
         DispatchQueue.main.sync {
             if let tab = resolveTabForReport(reportArgs) {
@@ -14655,20 +14683,19 @@ class TerminalController {
             return "ERROR: Missing metadata key — usage: \(usage)"
         }
 
-        var result = "OK"
-        DispatchQueue.main.sync {
-            guard let tab = resolveTabForReport(args) else {
-                result = parsed.options["tab"] != nil ? "ERROR: Tab not found" : "ERROR: No tab selected"
-                return
-            }
-            if tab.statusEntries.removeValue(forKey: key) == nil {
-                result = "OK (key not found)"
-            }
+        let tabResolution = resolveTabIdForSidebarMutation(reportArgs: args, options: parsed.options)
+        guard let targetTabId = tabResolution.tabId else {
+            return tabResolution.error ?? "ERROR: No tab selected"
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let tab = self.tabForSidebarMutation(id: targetTabId) else { return }
+            _ = tab.statusEntries.removeValue(forKey: key)
             if tab.agentPIDs.removeValue(forKey: key) != nil {
                 self.refreshTrackedAgentPorts(for: tab)
             }
         }
-        return result
+        return "OK"
     }
 
     /// Register an agent PID for stale-session detection without setting a visible status entry.

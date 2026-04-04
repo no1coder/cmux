@@ -891,6 +891,14 @@ final class SocketClient {
         return trimmed
     }
 
+    private static func socketTimeval(for timeout: TimeInterval) -> timeval {
+        let clampedTimeout = max(timeout, 0.01)
+        return timeval(
+            tv_sec: Int(clampedTimeout.rounded(.down)),
+            tv_usec: __darwin_suseconds_t((clampedTimeout - floor(clampedTimeout)) * 1_000_000)
+        )
+    }
+
     func connect() throws {
         if socketFD >= 0 { return }
         try connectOnce()
@@ -916,12 +924,11 @@ final class SocketClient {
         }
 
         let payload = command + "\n"
-        try payload.withCString { ptr in
-            let sent = Darwin.write(socketFD, ptr, strlen(ptr))
-            if sent < 0 {
-                throw CLIError(message: "Failed to write to socket")
-            }
-        }
+        try writeAll(
+            Data(payload.utf8),
+            timeoutMessage: "Command timed out",
+            failureMessage: "Failed to write to socket"
+        )
 
         var data = Data()
         var sawNewline = false
@@ -984,6 +991,12 @@ final class SocketClient {
         socketFD = socket(AF_UNIX, SOCK_STREAM, 0)
         if socketFD < 0 {
             throw CLIError(message: "Failed to create socket")
+        }
+        do {
+            try configureSocketWriteSafety(Self.responseTimeoutSeconds)
+        } catch {
+            close()
+            throw error
         }
 
         var addr = sockaddr_un()
@@ -1084,14 +1097,12 @@ final class SocketClient {
         guard socketFD >= 0 else {
             throw CLIError(message: "Failed to create relay socket")
         }
-
-        var timeout = timeval(
-            tv_sec: Int(Self.responseTimeoutSeconds.rounded(.down)),
-            tv_usec: __darwin_suseconds_t((Self.responseTimeoutSeconds - floor(Self.responseTimeoutSeconds)) * 1_000_000)
-        )
-        withUnsafePointer(to: &timeout) { pointer in
-            _ = setsockopt(socketFD, SOL_SOCKET, SO_RCVTIMEO, pointer, socklen_t(MemoryLayout<timeval>.size))
-            _ = setsockopt(socketFD, SOL_SOCKET, SO_SNDTIMEO, pointer, socklen_t(MemoryLayout<timeval>.size))
+        do {
+            try configureSocketWriteSafety(Self.responseTimeoutSeconds)
+            try configureReceiveTimeout(Self.responseTimeoutSeconds)
+        } catch {
+            close()
+            throw error
         }
 
         var address = sockaddr_in()
@@ -1149,7 +1160,11 @@ final class SocketClient {
             "relay_id": relayID,
             "mac": Self.hexString(from: mac),
         ])
-        try writeAll(authPayload + Data([0x0A]))
+        try writeAll(
+            authPayload + Data([0x0A]),
+            timeoutMessage: "Relay command timed out",
+            failureMessage: "Failed to write to relay socket"
+        )
 
         let authResponseLine = try readLine()
         guard let authResponseData = authResponseLine.data(using: .utf8),
@@ -1159,7 +1174,11 @@ final class SocketClient {
         }
     }
 
-    private func writeAll(_ data: Data) throws {
+    private func writeAll(
+        _ data: Data,
+        timeoutMessage: String,
+        failureMessage: String
+    ) throws {
         try data.withUnsafeBytes { rawBuffer in
             guard let baseAddress = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
                 return
@@ -1168,14 +1187,58 @@ final class SocketClient {
             while offset < data.count {
                 let written = Darwin.write(socketFD, baseAddress.advanced(by: offset), data.count - offset)
                 if written < 0 {
-                    if errno == EINTR {
+                    let errorCode = errno
+                    if errorCode == EINTR {
                         continue
                     }
-                    throw CLIError(message: "Failed to write to relay socket")
+                    close()
+                    if errorCode == EAGAIN || errorCode == EWOULDBLOCK || errorCode == ETIMEDOUT {
+                        throw CLIError(message: timeoutMessage)
+                    }
+                    let reason = String(cString: strerror(errorCode))
+                    throw CLIError(
+                        message: "\(failureMessage) (\(reason), errno \(errorCode))"
+                    )
+                }
+                if written == 0 {
+                    close()
+                    throw CLIError(message: failureMessage)
                 }
                 offset += written
             }
         }
+    }
+
+    private func configureSocketWriteSafety(_ timeout: TimeInterval) throws {
+        var interval = Self.socketTimeval(for: timeout)
+        let sendTimeoutResult = withUnsafePointer(to: &interval) { ptr in
+            setsockopt(
+                socketFD,
+                SOL_SOCKET,
+                SO_SNDTIMEO,
+                ptr,
+                socklen_t(MemoryLayout<timeval>.size)
+            )
+        }
+        guard sendTimeoutResult == 0 else {
+            throw CLIError(message: "Failed to configure socket write timeout")
+        }
+
+#if os(macOS)
+        var noSigPipe: Int32 = 1
+        let noSigPipeResult = withUnsafePointer(to: &noSigPipe) { ptr in
+            setsockopt(
+                socketFD,
+                SOL_SOCKET,
+                SO_NOSIGPIPE,
+                ptr,
+                socklen_t(MemoryLayout<Int32>.size)
+            )
+        }
+        guard noSigPipeResult == 0 else {
+            throw CLIError(message: "Failed to disable SIGPIPE on socket")
+        }
+#endif
     }
 
     private func readLine(maxBytes: Int = 16 * 1024) throws -> String {
@@ -1214,10 +1277,7 @@ final class SocketClient {
     }
 
     private func configureReceiveTimeout(_ timeout: TimeInterval) throws {
-        var interval = timeval(
-            tv_sec: Int(timeout.rounded(.down)),
-            tv_usec: __darwin_suseconds_t((timeout - floor(timeout)) * 1_000_000)
-        )
+        var interval = Self.socketTimeval(for: timeout)
         let result = withUnsafePointer(to: &interval) { ptr in
             setsockopt(
                 socketFD,
