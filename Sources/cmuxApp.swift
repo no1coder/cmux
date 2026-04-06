@@ -2719,6 +2719,45 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     }
 }
 
+private struct SettingsSearchField: NSViewRepresentable {
+    @Binding var text: String
+    let placeholder: String
+
+    func makeNSView(context: Context) -> NSSearchField {
+        let field = NSSearchField()
+        field.placeholderString = placeholder
+        field.delegate = context.coordinator
+        field.controlSize = .small
+        field.font = .systemFont(ofSize: 12)
+        (field.cell as? NSSearchFieldCell)?.sendsSearchStringImmediately = true
+        return field
+    }
+
+    func updateNSView(_ nsView: NSSearchField, context: Context) {
+        if nsView.stringValue != text {
+            nsView.stringValue = text
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text)
+    }
+
+    final class Coordinator: NSObject, NSSearchFieldDelegate {
+        @Binding var text: String
+
+        init(text: Binding<String>) {
+            _text = text
+        }
+
+        func controlTextDidChange(_ obj: Notification) {
+            if let field = obj.object as? NSSearchField {
+                text = field.stringValue
+            }
+        }
+    }
+}
+
 private struct SettingsTOCSidebar: View {
     @Binding var searchText: String
     let activeSection: SettingsSection?
@@ -2730,43 +2769,18 @@ private struct SettingsTOCSidebar: View {
     }
 
     @State private var selection: SettingsSection?
+    @State private var isUserNavigating = false
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.tertiary)
-                TextField(
-                    String(localized: "settings.search.placeholder", defaultValue: "Search settings"),
-                    text: $searchText
-                )
-                .textFieldStyle(.plain)
-                .font(.system(size: 12))
-                if !searchText.isEmpty {
-                    Button {
-                        searchText = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.tertiary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor).opacity(0.6))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .stroke(Color(nsColor: .separatorColor).opacity(0.3), lineWidth: 1)
-                    )
+            SettingsSearchField(
+                text: $searchText,
+                placeholder: String(localized: "settings.search.placeholder", defaultValue: "Search settings")
             )
+            .frame(height: 22)
             .padding(.horizontal, 12)
             .padding(.top, 52)
-            .padding(.bottom, 6)
+            .padding(.bottom, 8)
 
             List(filteredSections, selection: $selection) { section in
                 Label {
@@ -2781,11 +2795,15 @@ private struct SettingsTOCSidebar: View {
             }
             .listStyle(.sidebar)
             .onChange(of: selection) { _, newValue in
-                if let section = newValue {
-                    onSelect(section)
+                guard let section = newValue else { return }
+                isUserNavigating = true
+                onSelect(section)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    isUserNavigating = false
                 }
             }
             .onChange(of: activeSection) { _, newValue in
+                guard !isUserNavigating else { return }
                 if selection != newValue {
                     selection = newValue
                 }
