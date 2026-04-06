@@ -4671,6 +4671,11 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     // bursts don't spend main-thread time updating AppKit scroll state faster than
     // the user can see.
     private static let scrollbarFlushInterval: CFTimeInterval = 1.0 / 120.0
+    private enum ScrollbarPriorityState {
+        case normal
+        case awaitingExplicitAfterWheel
+        case holdingExplicitAfterWheel
+    }
     internal enum DropPlan: Equatable {
         case insertText(String)
         case uploadFiles([URL])
@@ -4706,10 +4711,22 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     private var _pendingScrollbar: GhosttyScrollbar?
     private var _scrollbarFlushScheduled = false
     private var _lastScrollbarFlushAt: CFTimeInterval = 0
+    private var _committedScrollbar: GhosttyScrollbar?
+    private var _scrollbarPriorityState: ScrollbarPriorityState = .normal
     private let _scrollbarLock = NSLock()
     var cellSize: CGSize = .zero
     var onScrollbarUpdate: ((GhosttyScrollbar) -> Void)?
     var onCellSizeUpdate: (() -> Void)?
+
+    /// Preserve the first post-wheel scrollbar movement that actually changes
+    /// position so later coalesced packets cannot overwrite it before flush.
+    func markNextScrollbarUpdateExplicit() {
+        _scrollbarLock.lock()
+        if _scrollbarPriorityState == .normal {
+            _scrollbarPriorityState = .awaitingExplicitAfterWheel
+        }
+        _scrollbarLock.unlock()
+    }
 
     /// Coalesce high-frequency scrollbar updates into a single main-thread
     /// dispatch.  The action callback (which may fire thousands of times per
@@ -4717,9 +4734,26 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     /// and schedules a flush no faster than the display can present it.
     func enqueueScrollbarUpdate(_ newValue: GhosttyScrollbar) {
         _scrollbarLock.lock()
-        // Store the latest value (always overwrites — only the newest matters).
-        _pendingScrollbar = newValue
-        let needsSchedule = !_scrollbarFlushScheduled
+        switch _scrollbarPriorityState {
+        case .normal:
+            // Duplicate packets against the last committed viewport do not change
+            // any visible state, so keep any newer pending update instead.
+            if newValue != _committedScrollbar {
+                _pendingScrollbar = newValue
+            }
+        case .awaitingExplicitAfterWheel:
+            // Ignore duplicate bottom packets while waiting for the first
+            // actual wheel-driven movement.
+            if newValue != _committedScrollbar {
+                _pendingScrollbar = newValue
+                _scrollbarPriorityState = .holdingExplicitAfterWheel
+            }
+        case .holdingExplicitAfterWheel:
+            // Keep the first non-duplicate wheel packet until it reaches the
+            // scroll view; later coalesced packets can be passive output.
+            break
+        }
+        let needsSchedule = _pendingScrollbar != nil && !_scrollbarFlushScheduled
         if needsSchedule { _scrollbarFlushScheduled = true }
         let earliestNextFlush = _lastScrollbarFlushAt + Self.scrollbarFlushInterval
         let delay = max(0, earliestNextFlush - CACurrentMediaTime())
@@ -4745,15 +4779,18 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         _scrollbarFlushScheduled = false
         let pending = _pendingScrollbar
         _pendingScrollbar = nil
-        if pending != nil {
+        let isDuplicate = pending == _committedScrollbar
+        if let pending, !isDuplicate {
+            _committedScrollbar = pending
             _lastScrollbarFlushAt = CACurrentMediaTime()
+        }
+        if _scrollbarPriorityState == .holdingExplicitAfterWheel {
+            _scrollbarPriorityState = isDuplicate ? .awaitingExplicitAfterWheel : .normal
         }
         _scrollbarLock.unlock()
 
-        guard let pending else { return }
-        if pending != scrollbar {
-            scrollbar = pending
-        }
+        guard let pending, !isDuplicate else { return }
+        scrollbar = pending
         onScrollbarUpdate?(pending)
     }
 
@@ -8049,8 +8086,11 @@ final class GhosttySurfaceScrollView: NSView {
         observers.append(NotificationCenter.default.addObserver(
             forName: .ghosttyDidReceiveWheelScroll,
             object: surfaceView,
-            queue: .main
+            // Arm explicit-wheel state synchronously so the very next scrollbar
+            // packet cannot arrive before we mark it as user initiated.
+            queue: nil
         ) { [weak self] _ in
+            self?.surfaceView.markNextScrollbarUpdateExplicit()
             self?.pendingExplicitWheelScroll = true
         })
 
