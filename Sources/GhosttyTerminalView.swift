@@ -1423,21 +1423,48 @@ class GhosttyApp {
         }
     }
 
+    private func hasConfiguredBackgroundImage(_ config: ghostty_config_t) -> Bool {
+        var backgroundImage: UnsafePointer<Int8>?
+        let key = "background-image"
+        guard ghostty_config_get(config, &backgroundImage, key, UInt(key.lengthOfBytes(using: .utf8))),
+              let backgroundImage else {
+            return false
+        }
+
+        return !String(cString: backgroundImage).isEmpty
+    }
+
     private func loadDefaultConfigFilesWithLegacyFallback(_ config: ghostty_config_t) {
         ghostty_config_load_default_files(config)
         loadLegacyGhosttyConfigIfNeeded(config)
         ghostty_config_load_recursive_files(config)
         loadCmuxAppSupportGhosttyConfigIfNeeded(config)
         loadCJKFontFallbackIfNeeded(config)
-        // cmux provides the terminal background via backgroundView (CALayer)
-        // instead of the GPU full-screen bg pass, so the layer can provide
-        // instant coverage during sidebar toggle and other layout transitions.
-        loadInlineGhosttyConfig(
-            "macos-background-from-layer = true",
-            into: config,
-            prefix: "cmux-layer-bg",
-            logLabel: "layer background"
-        )
+        if hasConfiguredBackgroundImage(config) {
+            // Background images need Ghostty's fullscreen background pass. Force
+            // the layer-backed solid-color shortcut back off even if the user
+            // config enabled it manually.
+            loadInlineGhosttyConfig(
+                "macos-background-from-layer = false",
+                into: config,
+                prefix: "cmux-layer-bg-image-override",
+                logLabel: "layer background image override"
+            )
+        } else {
+            // cmux provides the terminal background via backgroundView (CALayer)
+            // instead of the GPU full-screen bg pass, so the layer can provide
+            // instant coverage during sidebar toggle and other layout transitions.
+            //
+            // Keep Ghostty's native background rendering when a background image
+            // is configured: the separate CALayer background only matches the
+            // solid-color path, not Ghostty's combined image compositing.
+            loadInlineGhosttyConfig(
+                "macos-background-from-layer = true",
+                into: config,
+                prefix: "cmux-layer-bg",
+                logLabel: "layer background"
+            )
+        }
         ghostty_config_finalize(config)
     }
 
@@ -9238,6 +9265,9 @@ final class GhosttySurfaceScrollView: NSView {
 #endif
                 return
             }
+            if focusMountedSearchFieldIfAvailable(window: window, surfaceShort: surfaceShort) {
+                return
+            }
             // Explicitly unfocus the terminal so cursor stops blinking immediately.
             // The notification observer also does this, but it runs async when posted from main.
             surfaceView.terminalSurface?.setFocus(false)
@@ -9263,6 +9293,48 @@ final class GhosttySurfaceScrollView: NSView {
         }
     }
 
+    @discardableResult
+    private func focusMountedSearchFieldIfAvailable(
+        window: NSWindow,
+        surfaceShort: String
+    ) -> Bool {
+        guard let overlay = searchOverlayHostingView,
+              overlay.superview === self,
+              let field = findEditableSearchField(in: overlay) else {
+            return false
+        }
+
+        let firstResponder = window.firstResponder
+        let alreadyFocused = firstResponder === field ||
+            field.currentEditor() != nil ||
+            ((firstResponder as? NSTextView)?.delegate as? NSTextField) === field
+
+        surfaceView.terminalSurface?.setFocus(false)
+
+#if DEBUG
+        if alreadyFocused {
+            dlog(
+                "find.restoreSearchFocus.skip surface=\(surfaceShort) target=searchField " +
+                "reason=mountedFieldAlreadyFocused firstResponder=\(String(describing: firstResponder))"
+            )
+        }
+#endif
+        guard !alreadyFocused else { return true }
+
+        let result = window.makeFirstResponder(field)
+        let ownsField = window.firstResponder === field ||
+            ((window.firstResponder as? NSTextView)?.delegate as? NSTextField) === field
+
+#if DEBUG
+        dlog(
+            "find.restoreSearchFocus surface=\(surfaceShort) target=searchField " +
+            "via=mountedField result=\(result ? 1 : 0) firstResponder=\(String(describing: window.firstResponder))"
+        )
+#endif
+
+        return ownsField
+    }
+
     func capturePanelFocusIntent(in window: NSWindow?) -> TerminalPanelFocusIntent {
         if surfaceView.terminalSurface?.searchState != nil {
             if let firstResponder = window?.firstResponder as? NSView,
@@ -9285,6 +9357,27 @@ final class GhosttySurfaceScrollView: NSView {
             return .findField
         }
         return .surface
+    }
+
+    func responderMatchesPreferredKeyboardFocus(_ responder: NSResponder) -> Bool {
+        switch preferredPanelFocusIntentForActivation() {
+        case .surface:
+            let resolvedResponder: NSResponder
+            if let editor = responder as? NSTextView,
+               editor.isFieldEditor,
+               let editedView = editor.delegate as? NSView {
+                resolvedResponder = editedView
+            } else {
+                resolvedResponder = responder
+            }
+
+            guard let view = resolvedResponder as? NSView else { return false }
+            return view === surfaceView || view.isDescendant(of: surfaceView)
+
+        case .findField:
+            return isCurrentSurfaceSearchResponder(responder) &&
+                isSearchOverlayOrDescendant(responder)
+        }
     }
 
     func preparePanelFocusIntentForActivation(_ intent: TerminalPanelFocusIntent) {

@@ -4903,18 +4903,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return responder as? NSView
     }
 
-    private func responderNeedsFocusedTerminalKeyRepair(
-        _ responder: NSResponder?,
+    private func responderHasViableKeyRoutingOwner(
+        _ responder: NSResponder,
         in window: NSWindow
     ) -> Bool {
-        guard let responder else { return true }
-        if responder is NSWindow { return true }
-
         if let ghosttyView = cmuxOwningGhosttyView(for: responder) {
             if ghosttyView.window !== window {
-                return true
+                return false
             }
-            return ghosttyView.isHiddenOrHasHiddenAncestor
+            if ghosttyView.isHiddenOrHasHiddenAncestor {
+                return false
+            }
+            return ghosttyView === window.contentView || ghosttyView.superview != nil
         }
 
         guard let ownerView = keyRoutingOwnerView(for: responder) else {
@@ -4922,18 +4922,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
 
         if ownerView.window !== window {
-            return true
+            return false
         }
 
         if ownerView.isHiddenOrHasHiddenAncestor {
-            return true
+            return false
         }
 
         if ownerView !== window.contentView, ownerView.superview == nil {
-            return true
+            return false
         }
 
-        return false
+        return true
+    }
+
+    private func responderNeedsFocusedTerminalKeyRepair(
+        _ responder: NSResponder?,
+        in window: NSWindow,
+        hostedView: GhosttySurfaceScrollView
+    ) -> Bool {
+        guard let responder else { return true }
+        if responder is NSWindow { return true }
+        guard responderHasViableKeyRoutingOwner(responder, in: window) else {
+            return true
+        }
+        if hostedView.responderMatchesPreferredKeyboardFocus(responder) {
+            return false
+        }
+        if cmuxOwningGhosttyView(for: responder) != nil {
+            return true
+        }
+        guard let ownerView = keyRoutingOwnerView(for: responder) else {
+            return true
+        }
+        if ownerView === window.contentView {
+            return true
+        }
+        if ownerView is NSControl || responder is NSTextView {
+            return false
+        }
+        return true
     }
 
     func repairFocusedTerminalKeyboardRoutingIfNeeded(
@@ -4946,21 +4974,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         guard isMainTerminalWindow(window) else { return }
         guard window.attachedSheet == nil else { return }
         guard !isCommandPaletteEffectivelyVisible(in: window) else { return }
-        guard let context = contextForMainWindow(window),
+        guard let context = contextForMainWindow(window) ?? contextForMainTerminalWindow(window),
               let workspace = context.tabManager.selectedWorkspace,
               let panelId = workspace.focusedPanelId,
               let terminalPanel = workspace.terminalPanel(for: panelId) else {
             return
         }
-        guard terminalPanel.surface.searchState == nil else { return }
-        guard responderNeedsFocusedTerminalKeyRepair(window.firstResponder, in: window) else { return }
+        guard responderNeedsFocusedTerminalKeyRepair(
+            window.firstResponder,
+            in: window,
+            hostedView: terminalPanel.hostedView
+        ) else { return }
 
 #if DEBUG
         let before = window.firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
+        let target = terminalPanel.hostedView.preferredPanelFocusIntentForActivation()
         dlog(
             "focus.keyRepair attempt window=\(ObjectIdentifier(window)) " +
             "workspace=\(String(workspace.id.uuidString.prefix(5))) " +
             "panel=\(String(panelId.uuidString.prefix(5))) " +
+            "target=\(target == .findField ? "searchField" : "surface") " +
             "fr=\(before) keyCode=\(event.keyCode) mods=\(event.modifierFlags.rawValue)"
         )
 #endif
