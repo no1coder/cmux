@@ -29,6 +29,12 @@ var (
 	buildOnce       sync.Once
 	builtBinaryPath string
 	buildBinaryErr  error
+	daemonRegistry  = struct {
+		sync.Mutex
+		byEndpoint map[string]func() string
+	}{
+		byEndpoint: map[string]func() string{},
+	}
 )
 
 func daemonBinary(t *testing.T) string {
@@ -258,8 +264,7 @@ func compatPackageDir() string {
 
 type unixDaemonServer struct {
 	SocketPath string
-	cmd        *exec.Cmd
-	stderr     *bytes.Buffer
+	process    daemonProcess
 }
 
 func startUnixDaemon(t *testing.T, bin string) string {
@@ -280,26 +285,20 @@ func startUnixDaemon(t *testing.T, bin string) string {
 	socketPath := filepath.Join(socketDir, "s.sock")
 	server := &unixDaemonServer{
 		SocketPath: socketPath,
-		stderr:     &bytes.Buffer{},
 	}
-	server.cmd = exec.Command(
+	cmd := exec.Command(
 		bin,
 		"serve",
 		"--unix",
 		"--socket", server.SocketPath,
 	)
-	server.cmd.Dir = daemonRemoteRoot()
-	server.cmd.Stderr = server.stderr
-
-	if err := server.cmd.Start(); err != nil {
-		t.Fatalf("start unix daemon: %v", err)
-	}
+	cmd.Dir = daemonRemoteRoot()
+	server.process.start(t, cmd, "start unix daemon")
+	registerDaemonDiagnostics(server.SocketPath, server.process.diagnostics)
 
 	t.Cleanup(func() {
-		if server.cmd.Process != nil {
-			_ = server.cmd.Process.Kill()
-		}
-		_ = server.cmd.Wait()
+		unregisterDaemonDiagnostics(server.SocketPath)
+		server.process.stop()
 	})
 
 	waitForUnixSocket(t, server)
@@ -330,9 +329,8 @@ func startUnixDaemonWithWS(t *testing.T, bin string, wsSecret string) (socketPat
 
 	server := &unixDaemonServer{
 		SocketPath: socketPath,
-		stderr:     &bytes.Buffer{},
 	}
-	server.cmd = exec.Command(
+	cmd := exec.Command(
 		bin,
 		"serve",
 		"--unix",
@@ -340,22 +338,21 @@ func startUnixDaemonWithWS(t *testing.T, bin string, wsSecret string) (socketPat
 		"--ws-port", wsPort,
 		"--ws-secret", wsSecret,
 	)
-	server.cmd.Dir = daemonRemoteRoot()
-	server.cmd.Stderr = server.stderr
-
-	if err := server.cmd.Start(); err != nil {
-		t.Fatalf("start unix daemon with websocket: %v", err)
-	}
+	cmd.Dir = daemonRemoteRoot()
+	server.process.start(t, cmd, "start unix daemon with websocket")
+	registerDaemonDiagnostics(server.SocketPath, server.process.diagnostics)
 
 	t.Cleanup(func() {
-		if server.cmd.Process != nil {
-			_ = server.cmd.Process.Kill()
-		}
-		_ = server.cmd.Wait()
+		unregisterDaemonDiagnostics(server.SocketPath)
+		server.process.stop()
 	})
 
 	waitForUnixSocket(t, server)
-	waitForTCPServer(t, wsAddr, server.stderr)
+	registerDaemonDiagnostics(wsAddr, server.process.diagnostics)
+	t.Cleanup(func() {
+		unregisterDaemonDiagnostics(wsAddr)
+	})
+	waitForTCPServer(t, wsAddr, &server.process.stderr)
 	return socketPath, wsAddr
 }
 
@@ -369,7 +366,7 @@ func newUnixJSONRPCClient(t *testing.T, socketPath string) *unixJSONRPCClient {
 
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
-		t.Fatalf("dial unix socket %s: %v", socketPath, err)
+		t.Fatalf("dial unix socket %s: %v%s", socketPath, err, daemonDiagnosticsForEndpoint(socketPath))
 	}
 	t.Cleanup(func() {
 		_ = conn.Close()
@@ -401,8 +398,7 @@ type tlsDaemonServer struct {
 	ServerID     string
 	TicketSecret []byte
 
-	cmd    *exec.Cmd
-	stderr *bytes.Buffer
+	process daemonProcess
 }
 
 func startTLSServer(t *testing.T, bin string) *tlsDaemonServer {
@@ -416,9 +412,8 @@ func startTLSServer(t *testing.T, bin string) *tlsDaemonServer {
 		Addr:         addr,
 		ServerID:     "cmux-macmini",
 		TicketSecret: []byte("compat-secret"),
-		stderr:       &bytes.Buffer{},
 	}
-	server.cmd = exec.Command(
+	cmd := exec.Command(
 		bin,
 		"serve",
 		"--tls",
@@ -428,18 +423,13 @@ func startTLSServer(t *testing.T, bin string) *tlsDaemonServer {
 		"--cert-file", certFile,
 		"--key-file", keyFile,
 	)
-	server.cmd.Dir = daemonRemoteRoot()
-	server.cmd.Stderr = server.stderr
-
-	if err := server.cmd.Start(); err != nil {
-		t.Fatalf("start tls daemon: %v", err)
-	}
+	cmd.Dir = daemonRemoteRoot()
+	server.process.start(t, cmd, "start tls daemon")
+	registerDaemonDiagnostics(server.Addr, server.process.diagnostics)
 
 	t.Cleanup(func() {
-		if server.cmd.Process != nil {
-			_ = server.cmd.Process.Kill()
-		}
-		_ = server.cmd.Wait()
+		unregisterDaemonDiagnostics(server.Addr)
+		server.process.stop()
 	})
 
 	waitForTLSServer(t, server)
@@ -489,7 +479,7 @@ func dialTLSServer(t *testing.T, server *tlsDaemonServer) *tls.Conn {
 		InsecureSkipVerify: true,
 	})
 	if err != nil {
-		t.Fatalf("dial tls server %s: %v\nstderr:\n%s", server.Addr, err, server.stderr.String())
+		t.Fatalf("dial tls server %s: %v%s", server.Addr, err, server.process.diagnostics())
 	}
 	return conn
 }
@@ -516,7 +506,7 @@ func writeAndReadJSONWithReader(t *testing.T, conn net.Conn, reader *bufio.Reade
 
 	line, err := reader.ReadString('\n')
 	if err != nil {
-		t.Fatalf("read response: %v", err)
+		t.Fatalf("read response: %v%s", err, daemonDiagnosticsForConn(conn))
 	}
 
 	var response map[string]any
@@ -541,7 +531,7 @@ func waitForUnixSocket(t *testing.T, server *unixDaemonServer) {
 			err = dialErr
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("unix daemon did not start on %s: %v\nstderr:\n%s", server.SocketPath, err, server.stderr.String())
+			t.Fatalf("unix daemon did not start on %s: %v%s", server.SocketPath, err, server.process.diagnostics())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -561,7 +551,7 @@ func waitForTLSServer(t *testing.T, server *tlsDaemonServer) {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("tls daemon did not start on %s: %v\nstderr:\n%s", server.Addr, err, server.stderr.String())
+			t.Fatalf("tls daemon did not start on %s: %v%s", server.Addr, err, server.process.diagnostics())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -582,6 +572,104 @@ func waitForTCPServer(t *testing.T, addr string, stderr *bytes.Buffer) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+type daemonProcess struct {
+	cmd    *exec.Cmd
+	stderr bytes.Buffer
+
+	mu      sync.Mutex
+	exited  bool
+	exitErr error
+	done    chan struct{}
+}
+
+func (p *daemonProcess) start(t *testing.T, cmd *exec.Cmd, startMessage string) {
+	t.Helper()
+
+	p.cmd = cmd
+	p.done = make(chan struct{})
+	p.cmd.Stderr = &p.stderr
+
+	if err := p.cmd.Start(); err != nil {
+		t.Fatalf("%s: %v", startMessage, err)
+	}
+
+	go func() {
+		err := p.cmd.Wait()
+		p.mu.Lock()
+		p.exited = true
+		p.exitErr = err
+		p.mu.Unlock()
+		close(p.done)
+	}()
+}
+
+func (p *daemonProcess) stop() {
+	if p == nil || p.cmd == nil {
+		return
+	}
+	if p.cmd.Process != nil {
+		_ = p.cmd.Process.Kill()
+	}
+	if p.done != nil {
+		<-p.done
+	}
+}
+
+func (p *daemonProcess) diagnostics() string {
+	if p == nil {
+		return ""
+	}
+
+	p.mu.Lock()
+	exited := p.exited
+	exitErr := p.exitErr
+	p.mu.Unlock()
+
+	stderr := strings.TrimSpace(p.stderr.String())
+	var details []string
+	if exited {
+		details = append(details, fmt.Sprintf("process exit: %v", exitErr))
+	} else {
+		details = append(details, "process state: still running")
+	}
+	if stderr != "" {
+		details = append(details, fmt.Sprintf("stderr:\n%s", stderr))
+	}
+	if len(details) == 0 {
+		return ""
+	}
+	return "\n" + strings.Join(details, "\n")
+}
+
+func registerDaemonDiagnostics(endpoint string, fn func() string) {
+	daemonRegistry.Lock()
+	defer daemonRegistry.Unlock()
+	daemonRegistry.byEndpoint[endpoint] = fn
+}
+
+func unregisterDaemonDiagnostics(endpoint string) {
+	daemonRegistry.Lock()
+	defer daemonRegistry.Unlock()
+	delete(daemonRegistry.byEndpoint, endpoint)
+}
+
+func daemonDiagnosticsForConn(conn net.Conn) string {
+	if conn == nil {
+		return ""
+	}
+	return daemonDiagnosticsForEndpoint(conn.RemoteAddr().String())
+}
+
+func daemonDiagnosticsForEndpoint(endpoint string) string {
+	daemonRegistry.Lock()
+	fn := daemonRegistry.byEndpoint[endpoint]
+	daemonRegistry.Unlock()
+	if fn == nil {
+		return ""
+	}
+	return fn()
 }
 
 func freeTCPAddress(t *testing.T) string {
