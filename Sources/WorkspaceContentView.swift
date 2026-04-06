@@ -200,7 +200,9 @@ final class TmuxWorkspacePaneOverlayModel {
             }
 
             self.flashStartedAt = nil
-            self.runningFlashToken = nil
+            // Keep the handled token latched so later layout churn with the same
+            // token cannot replay a completed flash. A new token or workspace
+            // change will reset the latch.
             self.onStateChange?()
         }
         flashResetWorkItem = workItem

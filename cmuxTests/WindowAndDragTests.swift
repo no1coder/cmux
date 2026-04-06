@@ -1374,6 +1374,56 @@ final class TmuxWorkspacePaneOverlayTests: XCTestCase {
         XCTAssertNil(model.flashStartedAt)
     }
 
+    func testTmuxWorkspacePaneOverlayModelDoesNotReplayCompletedFlashToken() {
+        let clearExpectation = expectation(description: "flash auto clears once")
+        let startedAt = Date()
+        let workspaceId = UUID()
+        let model = TmuxWorkspacePaneOverlayModel()
+        model.onStateChange = {
+            if model.flashStartedAt == nil {
+                clearExpectation.fulfill()
+            }
+        }
+
+        model.apply(
+            TmuxWorkspacePaneOverlayRenderState(
+                workspaceId: workspaceId,
+                unreadRects: [],
+                flashRect: CGRect(x: 10, y: 20, width: 300, height: 200),
+                flashToken: 1,
+                flashReason: .notificationArrival
+            )
+        )
+        model.apply(
+            TmuxWorkspacePaneOverlayRenderState(
+                workspaceId: workspaceId,
+                unreadRects: [],
+                flashRect: CGRect(x: 10, y: 20, width: 300, height: 200),
+                flashToken: 2,
+                flashReason: .notificationArrival
+            ),
+            now: { startedAt }
+        )
+
+        XCTAssertEqual(model.flashStartedAt, startedAt)
+        wait(for: [clearExpectation], timeout: FocusFlashPattern.duration + 0.5)
+        XCTAssertNil(model.flashStartedAt)
+
+        model.apply(
+            TmuxWorkspacePaneOverlayRenderState(
+                workspaceId: workspaceId,
+                unreadRects: [],
+                flashRect: CGRect(x: 10, y: 20, width: 300, height: 200),
+                flashToken: 2,
+                flashReason: .notificationArrival
+            ),
+            now: { startedAt.addingTimeInterval(10) }
+        )
+
+        XCTAssertNil(model.flashStartedAt)
+        XCTAssertFalse(model.showsAnimatedFlash)
+    }
+
     func testTmuxWorkspacePaneOverlayModelPreservesFlashAcrossTransientNilRect() {
         let startedAt = Date()
         let workspaceId = UUID()
