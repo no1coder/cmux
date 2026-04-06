@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -131,7 +132,9 @@ impl Daemon {
                 Ok(stream) => {
                     let daemon = self.clone();
                     thread::spawn(move || {
-                        let _ = daemon.serve_stream(stream, None);
+                        if let Err(err) = daemon.serve_stream(stream, None) {
+                            debug_log(&format!("unix stream closed with error: {err}"));
+                        }
                     });
                 }
                 Err(err) => return Err(err.to_string()),
@@ -148,7 +151,9 @@ impl Daemon {
                     let daemon = self.clone();
                     let secret = secret.to_string();
                     thread::spawn(move || {
-                        let _ = daemon.serve_websocket_stream(stream, &secret);
+                        if let Err(err) = daemon.serve_websocket_stream(stream, &secret) {
+                            debug_log(&format!("websocket stream closed with error: {err}"));
+                        }
                     });
                 }
                 Err(err) => return Err(err.to_string()),
@@ -191,11 +196,13 @@ impl Daemon {
                             rustls::ServerConnection::new(config).map_err(|err| err.to_string());
                         if let Ok(connection) = connection {
                             let stream = rustls::StreamOwned::new(connection, stream);
-                            let _ = daemon.serve_tls_stream(
-                                stream,
-                                &server_id,
-                                ticket_secret.as_bytes(),
-                            );
+                            if let Err(err) =
+                                daemon.serve_tls_stream(stream, &server_id, ticket_secret.as_bytes())
+                            {
+                                debug_log(&format!("tls stream closed with error: {err}"));
+                            }
+                        } else if let Err(err) = connection {
+                            debug_log(&format!("failed to create tls server connection: {err}"));
                         }
                     });
                 }
@@ -292,6 +299,7 @@ impl Daemon {
         authorizer: Option<DirectAuthorizer>,
     ) -> Result<(), String> {
         let mut authorizer = authorizer;
+        let mut last_method: Option<String> = None;
         loop {
             let response = match read_frame(&mut reader) {
                 Ok(FrameRead::Eof) => return Ok(()),
@@ -300,10 +308,19 @@ impl Daemon {
                     "invalid_request",
                     "request frame exceeds maximum size",
                 ),
-                Ok(FrameRead::Frame(frame)) => self.parse_and_dispatch(&frame, authorizer.as_mut()),
-                Err(err) => return Err(err.to_string()),
+                Ok(FrameRead::Frame(frame)) => {
+                    last_method = request_method_for_frame(&frame);
+                    self.parse_and_dispatch(&frame, authorizer.as_mut())
+                }
+                Err(err) => {
+                    let context = last_method.as_deref().unwrap_or("unknown");
+                    return Err(format!("read_frame after {context}: {err}"));
+                }
             };
-            write_response(reader.get_mut(), &response).map_err(|err| err.to_string())?;
+            if let Err(err) = write_response(reader.get_mut(), &response) {
+                let context = last_method.as_deref().unwrap_or("unknown");
+                return Err(format!("write_response for {context}: {err}"));
+            }
         }
     }
 
@@ -1568,6 +1585,23 @@ impl Daemon {
             state.events.pop_front();
             state.event_base_cursor += 1;
         }
+    }
+}
+
+fn request_method_for_frame(frame: &[u8]) -> Option<String> {
+    serde_json::from_slice::<Value>(trim_crlf(frame))
+        .ok()
+        .and_then(|value| {
+            value
+                .get("method")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
+}
+
+fn debug_log(message: &str) {
+    if env::var_os("CMUX_REMOTE_DEBUG_LOG").is_some() {
+        eprintln!("cmuxd-remote debug: {message}");
     }
 }
 

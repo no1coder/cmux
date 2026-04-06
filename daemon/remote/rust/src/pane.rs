@@ -1,3 +1,4 @@
+use std::env;
 use std::io::{Read, Write};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
@@ -283,6 +284,9 @@ fn run_pane_actor(
             runtime
         }
         Err(err) => {
+            debug_log(&format!(
+                "pane {pane_id} failed to start command {command:?}: {err}"
+            ));
             {
                 let mut state = shared.state.lock().unwrap();
                 state.closed = true;
@@ -335,6 +339,7 @@ fn run_pane_actor(
                         });
                     }
                     Ok(ReaderEvent::Eof) | Err(_) => {
+                        debug_log(&format!("pane {pane_id} reader reached EOF"));
                         reader_rx = crossbeam_channel::never();
                         {
                             let mut state = shared.state.lock().unwrap();
@@ -382,6 +387,7 @@ fn run_pane_actor(
                         let _ = reply.send(result);
                     }
                     Ok(PaneCommand::Close(reply)) => {
+                        debug_log(&format!("pane {pane_id} received close command"));
                         {
                             let mut state = shared.state.lock().unwrap();
                             state.closed = true;
@@ -475,6 +481,12 @@ fn reader_loop(mut reader: Box<dyn Read + Send>, tx: Sender<ReaderEvent>) {
                 return;
             }
         }
+    }
+}
+
+fn debug_log(message: &str) {
+    if env::var_os("CMUX_REMOTE_DEBUG_LOG").is_some() {
+        eprintln!("cmuxd-remote debug: {message}");
     }
 }
 
