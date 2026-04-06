@@ -14,6 +14,9 @@ final class RelayBridge {
     /// 关联的 RelayClient（用于推送事件到手机端）
     weak var relayClient: RelayClient?
 
+    /// 代理审批路由器（处理 agent.approve / agent.reject 消息）
+    var agentApproval: RelayAgentApproval?
+
     // MARK: - 初始化
 
     init(socketPath: String) {
@@ -34,6 +37,28 @@ final class RelayBridge {
         // 提取请求信封字段
         guard let requestID = envelope["id"] as? String,
               let payload = envelope["payload"] else {
+            return
+        }
+
+        // 检查是否是代理审批响应消息（agent.approve / agent.reject）
+        // 这类消息不转发到本地 socket，而是由 agentApproval 处理
+        if let payloadDict = payload as? [String: Any],
+           let method = payloadDict["method"] as? String,
+           method == "agent.approve" || method == "agent.reject" {
+            let approved = method == "agent.approve"
+            let params = payloadDict["params"] as? [String: Any]
+            let approvalRequestID = params?["request_id"] as? String ?? requestID
+
+            agentApproval?.handleApprovalResponse(requestID: approvalRequestID, approved: approved)
+
+            // 回传成功响应信封
+            let successEnvelope: [String: Any] = [
+                "id": requestID,
+                "payload": ["ok": true],
+            ]
+            if let outData = try? JSONSerialization.data(withJSONObject: successEnvelope) {
+                relayClient?.send(outData)
+            }
             return
         }
 
