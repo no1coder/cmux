@@ -39,18 +39,14 @@ func daemonBinary(t *testing.T) string {
 	}
 
 	buildOnce.Do(func() {
-		outputDir, err := os.MkdirTemp("", "cmuxd-remote-go-*")
-		if err != nil {
-			buildBinaryErr = err
-			return
-		}
-		builtBinaryPath = filepath.Join(outputDir, "cmuxd-remote-go")
-
-		cmd := exec.Command("go", "build", "-ldflags", "-linkmode=external", "-o", builtBinaryPath, "./cmd/cmuxd-remote")
+		builtBinaryPath = filepath.Join(daemonRemoteRoot(), "rust", "target", "debug", "cmuxd-remote")
+		repoRoot := filepath.Clean(filepath.Join(daemonRemoteRoot(), "../.."))
+		cmd := exec.Command("cargo", "build", "--manifest-path", "./rust/Cargo.toml")
 		cmd.Dir = daemonRemoteRoot()
+		cmd.Env = append(os.Environ(), "GHOSTTY_SOURCE_DIR="+filepath.Join(repoRoot, "ghostty"))
 		output, err := cmd.CombinedOutput()
 		if err != nil {
-			buildBinaryErr = fmt.Errorf("go build failed: %w\n%s", err, strings.TrimSpace(string(output)))
+			buildBinaryErr = fmt.Errorf("cargo build failed: %w\n%s", err, strings.TrimSpace(string(output)))
 			return
 		}
 	})
