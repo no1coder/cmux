@@ -10273,8 +10273,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     private func refreshConfiguredShortcutChordActions() {
-        configuredShortcutChordActions = KeyboardShortcutSettings.Action.allCases.filter {
-            KeyboardShortcutSettings.shortcut(for: $0).hasChord
+        configuredShortcutChordActions = KeyboardShortcutSettings.Action.allCases.filter { action in
+            // showHideAllWindows is dispatched via Carbon RegisterEventHotKey
+            // (SystemWideHotkeyController) and never routed through AppKit's
+            // local key handler. If a managed settings.json entry happened to
+            // store it as a chord, arming the prefix here would swallow the
+            // first stroke and leave the second one orphaned, breaking that
+            // keystroke for the focused terminal/browser input.
+            guard action != .showHideAllWindows else { return false }
+            return KeyboardShortcutSettings.shortcut(for: action).hasChord
         }
     }
 

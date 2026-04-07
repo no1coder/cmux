@@ -153,7 +153,11 @@ enum KeyboardShortcutSettings {
             case .reloadConfiguration:
                 return StoredShortcut(key: ",", command: true, shift: true, option: false, control: false)
             case .showHideAllWindows:
-                return StoredShortcut(key: ".", command: true, shift: false, option: false, control: false)
+                // Avoid AppKit-reserved keystrokes such as Cmd+. (modal
+                // cancel). Default to Ctrl+Option+Cmd+. so the global hotkey
+                // does not collide with the standard cancel keystroke that
+                // NSAlert/NSOpenPanel use.
+                return StoredShortcut(key: ".", command: true, shift: false, option: true, control: true)
             case .newWindow:
                 return StoredShortcut(key: "n", command: true, shift: true, option: false, control: false)
             case .closeWindow:
@@ -371,6 +375,10 @@ enum KeyboardShortcutSettings {
         StoredShortcut(key: "\t", command: false, shift: true, option: false, control: true),
         StoredShortcut(key: "`", command: true, shift: false, option: false, control: false),
         StoredShortcut(key: "`", command: true, shift: true, option: false, control: false),
+        // Cmd+. is AppKit's standard cancel keystroke for modal alerts and
+        // open/save panels. Refuse to register it as the global hotkey so the
+        // first instinctive "cancel" press never hides the whole app.
+        StoredShortcut(key: ".", command: true, shift: false, option: false, control: false),
     ]
 
     static func shortcut(for action: Action) -> StoredShortcut {
@@ -758,8 +766,14 @@ final class SystemWideHotkeyController {
     }
 
     private func toggleApplicationVisibility() {
+        // Only treat the hotkey as a "hide" toggle when cmux itself is the
+        // frontmost app and has at least one visible window. If the user
+        // pressed the hotkey from another app, cmux is not frontmost (even if
+        // some of its windows are still on screen) and the expected behavior
+        // is to bring cmux forward, not hide it.
+        let isFrontmost = NSApp.isActive && !NSApp.isHidden
         let hasVisibleWindow = NSApp.windows.contains { $0.isVisible && !$0.isMiniaturized }
-        if hasVisibleWindow {
+        if isFrontmost && hasVisibleWindow {
             captureHiddenWindowRestoreTargets()
             NSApp.hide(nil)
             return

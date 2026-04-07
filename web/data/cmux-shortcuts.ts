@@ -27,7 +27,7 @@ export const shortcutCategories: ShortcutCategory[] = [
       { id: "reloadConfiguration", combos: [["⌘", "⇧", ","]], description: { en: "Reload configuration", ja: "構成を再読み込み" } },
       {
         id: "showHideAllWindows",
-        combos: [["⌘", "."]],
+        combos: [["⌃", "⌥", "⌘", "."]],
         description: { en: "Show/hide all cmux windows", ja: "すべてのcmuxウインドウを表示/非表示" },
         note: { en: "system-wide hotkey", ja: "システム全体のホットキー" },
       },
