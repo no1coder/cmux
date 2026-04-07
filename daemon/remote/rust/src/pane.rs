@@ -373,7 +373,8 @@ fn run_pane_actor(
                                 pixel_height: 0,
                             })
                             .map_err(|err| err.to_string())
-                            .and_then(|_| runtime.terminal.resize(cols.max(2), rows.max(1)));
+                            .and_then(|_| runtime.terminal.resize(cols.max(2), rows.max(1)))
+                            .map(|_| notify_winch(runtime.child.as_mut()));
                         let _ = reply.send(result);
                     }
                     Ok(PaneCommand::Capture(include_history, reply)) => {
@@ -424,6 +425,15 @@ fn run_pane_actor(
 
     let _ = runtime.child.kill();
     let _ = runtime.child.wait();
+}
+
+fn notify_winch(child: &mut dyn Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.process_id() {
+        unsafe {
+            let _ = libc::kill(pid as i32, libc::SIGWINCH);
+        }
+    }
 }
 
 fn spawn_runtime(command: &str, cols: u16, rows: u16) -> Result<PaneRuntime, String> {
