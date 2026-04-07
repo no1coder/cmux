@@ -104,6 +104,17 @@ final class RelayBridge {
                 self.sendRPCResponse(requestID: requestID, result: ["surfaces": allSurfaces])
             }
 
+        // workspace.create：创建后推送更新的列表
+        case "workspace.create":
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else { return }
+                self.forwardToSocket(method: method, params: params, requestID: requestID)
+                // 创建成功后推送更新的 surface 列表
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.5) {
+                    self.pushSurfaceList()
+                }
+            }
+
         // V1 文本命令（read_screen 不支持 JSON-RPC，需要用 V1 协议）
         case "read_screen":
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
