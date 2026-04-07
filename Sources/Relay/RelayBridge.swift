@@ -96,6 +96,14 @@ final class RelayBridge {
                 self.sendRPCResponse(requestID: requestID, result: result)
             }
 
+        // surface.list 拦截：遍历所有 workspace 获取完整列表
+        case "surface.list":
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else { return }
+                let allSurfaces = self.collectAllSurfaces()
+                self.sendRPCResponse(requestID: requestID, result: ["surfaces": allSurfaces])
+            }
+
         // V1 文本命令（read_screen 不支持 JSON-RPC，需要用 V1 协议）
         case "read_screen":
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -282,56 +290,50 @@ final class RelayBridge {
         #endif
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-
-            // 1. 获取所有 workspace
-            guard let wsResponse = self.sendJsonRPC(method: "workspace.list", params: nil),
-                  let wsResult = wsResponse["result"] as? [String: Any],
-                  let workspaces = wsResult["workspaces"] as? [[String: Any]] else {
-                #if DEBUG
-                dlog("[relay] pushSurfaceList: workspace.list 失败")
-                #endif
-                return
-            }
-
-            // 记录当前选中的 workspace，后面要切回来
-            let currentWsID = workspaces.first { ($0["selected"] as? Bool) == true }?["id"] as? String
-
-            // 2. 遍历每个 workspace，获取其 surfaces
-            var allSurfaces: [[String: Any]] = []
-            for ws in workspaces {
-                guard let wsID = ws["id"] as? String else { continue }
-                let wsName = ws["name"] as? String ?? ""
-                let wsSelected = (ws["selected"] as? Bool) ?? false
-
-                // 切换到该 workspace（如果不是当前的）
-                if !wsSelected {
-                    _ = self.sendJsonRPC(method: "workspace.select", params: ["workspace_id": wsID])
-                }
-
-                // 获取该 workspace 的 surfaces
-                if let surfResp = self.sendJsonRPC(method: "surface.list", params: nil),
-                   let surfResult = surfResp["result"] as? [String: Any],
-                   let surfaces = surfResult["surfaces"] as? [[String: Any]] {
-                    for var surf in surfaces {
-                        // 附加 workspace 信息
-                        surf["workspace_id"] = wsID
-                        surf["workspace_name"] = wsName
-                        allSurfaces.append(surf)
-                    }
-                }
-            }
-
-            // 3. 切回原来的 workspace
-            if let currentWsID {
-                _ = self.sendJsonRPC(method: "workspace.select", params: ["workspace_id": currentWsID])
-            }
-
+            let allSurfaces = self.collectAllSurfaces()
             #if DEBUG
-            dlog("[relay] pushSurfaceList: 共 \(allSurfaces.count) 个 surface，跨 \(workspaces.count) 个 workspace")
+            dlog("[relay] pushSurfaceList: 共 \(allSurfaces.count) 个 surface")
             #endif
-
             self.pushEvent("surface.list_update", payload: ["surfaces": allSurfaces])
         }
+    }
+
+    /// 收集所有 workspace 的 surfaces
+    private func collectAllSurfaces() -> [[String: Any]] {
+        guard let wsResp = sendJsonRPC(method: "workspace.list", params: nil),
+              let wsResult = wsResp["result"] as? [String: Any],
+              let workspaces = wsResult["workspaces"] as? [[String: Any]] else {
+            return []
+        }
+
+        let currentWsID = workspaces.first { ($0["selected"] as? Bool) == true }?["id"] as? String
+        var allSurfaces: [[String: Any]] = []
+
+        for ws in workspaces {
+            guard let wsID = ws["id"] as? String else { continue }
+            let wsName = ws["name"] as? String ?? ""
+            let wsSelected = (ws["selected"] as? Bool) ?? false
+
+            if !wsSelected {
+                _ = sendJsonRPC(method: "workspace.select", params: ["workspace_id": wsID])
+            }
+
+            if let surfResp = sendJsonRPC(method: "surface.list", params: nil),
+               let surfResult = surfResp["result"] as? [String: Any],
+               let surfaces = surfResult["surfaces"] as? [[String: Any]] {
+                for var surf in surfaces {
+                    surf["workspace_id"] = wsID
+                    surf["workspace_name"] = wsName
+                    allSurfaces.append(surf)
+                }
+            }
+        }
+
+        if let currentWsID {
+            _ = sendJsonRPC(method: "workspace.select", params: ["workspace_id": currentWsID])
+        }
+
+        return allSurfaces
     }
 
     /// 发送 JSON-RPC 请求并返回解析后的响应
