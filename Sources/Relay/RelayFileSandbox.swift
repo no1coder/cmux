@@ -26,18 +26,34 @@ struct RelayFileSandbox {
     /// 允许访问的根目录列表
     let allowedRoots: [String]
 
-    /// 敏感文件/目录匹配模式（小写匹配）
-    private static let sensitivePatterns: [String] = [
+    /// 敏感文件/目录名称精确匹配（路径组件或文件名完全相等，小写）
+    private static let sensitiveNames: [String] = [
         ".env",
-        ".ssh/",
-        ".gnupg/",
-        ".aws/",
+        ".ssh",
+        ".gnupg",
+        ".aws",
         "credentials",
         "secrets",
         "id_rsa",
         "id_ed25519",
         ".npmrc",
         ".pypirc",
+        // 扩充：容器凭证、SSH 已知主机
+        ".netrc",
+        "known_hosts",
+    ]
+
+    /// 敏感文件扩展名精确匹配（文件扩展名完全相等，小写，不含点）
+    private static let sensitiveExtensions: [String] = [
+        "pem",
+        "key",
+        "p12",
+    ]
+
+    /// 需要结合父目录判断的敏感路径（父目录名 → 文件名，均小写）
+    private static let sensitiveContextPaths: [(parent: String, filename: String)] = [
+        (".docker", "config.json"),
+        (".kube", "config"),
     ]
 
     // MARK: - 公开接口
@@ -47,8 +63,10 @@ struct RelayFileSandbox {
     /// - Returns: 标准化后的路径字符串
     /// - Throws: `FileSandboxError` 如果路径不安全
     func validate(path: String) throws -> String {
-        // 1. 拒绝包含 ".." 的路径（防止路径穿越）
-        if path.contains("..") {
+        // 1. 拒绝路径组件中含有 ".." 的路径（防止路径穿越）
+        //    使用 pathComponents 精确匹配，避免误判含 ".." 的合法文件名
+        let components = (path as NSString).pathComponents
+        if components.contains("..") {
             throw FileSandboxError.pathTraversal
         }
 
@@ -56,35 +74,47 @@ struct RelayFileSandbox {
         let fileURL = URL(fileURLWithPath: path).standardized
         let standardizedPath = fileURL.path
 
-        // 3. 检查文件是否存在
-        guard FileManager.default.fileExists(atPath: standardizedPath) else {
-            throw FileSandboxError.fileNotFound
-        }
-
-        // 4. 解析符号链接，验证目标在允许的根目录内
-        let resolvedPath: String
-        do {
-            resolvedPath = try FileManager.default.destinationOfSymbolicLink(atPath: standardizedPath)
-        } catch {
-            // 不是符号链接，使用标准化路径本身
-            let resolved = URL(fileURLWithPath: standardizedPath).resolvingSymlinksInPath().path
-            resolvedPath = resolved
-        }
-
-        // 检查解析后的路径是否在允许根目录下
-        if !isUnderAllowedRoot(resolvedPath) {
-            throw FileSandboxError.symbolicLinkEscape
-        }
-
-        // 5. 检查标准化路径是否在允许的根目录下
+        // 3. 先检查路径是否在允许根目录下（防止路径预言机攻击：通过文件存在性探测路径）
         if !isUnderAllowedRoot(standardizedPath) {
             throw FileSandboxError.pathOutsideAllowedRoot
         }
 
-        // 6. 检查敏感文件模式
-        let lowerPath = standardizedPath.lowercased()
-        for pattern in Self.sensitivePatterns {
-            if lowerPath.contains(pattern) {
+        // 4. 检查文件是否存在
+        guard FileManager.default.fileExists(atPath: standardizedPath) else {
+            throw FileSandboxError.fileNotFound
+        }
+
+        // 5. 递归解析符号链接（使用 resolvingSymlinksInPath 完整解析链式符号链接）
+        let resolvedPath = URL(fileURLWithPath: standardizedPath).resolvingSymlinksInPath().path
+
+        // 检查解析后的路径是否在允许根目录下（防止符号链接逃逸）
+        if !isUnderAllowedRoot(resolvedPath) {
+            throw FileSandboxError.symbolicLinkEscape
+        }
+
+        // 6. 检查敏感文件模式（精确匹配路径组件，避免误判含敏感词的无害文件名）
+        let nsPath = standardizedPath as NSString
+        let lowerComponents = nsPath.pathComponents.map { $0.lowercased() }
+        let lowerFilename = nsPath.lastPathComponent.lowercased()
+        let lowerExtension = (lowerFilename as NSString).pathExtension.lowercased()
+        let lowerParent = (nsPath.deletingLastPathComponent as NSString)
+            .lastPathComponent.lowercased()
+
+        // 6a. 名称精确匹配（文件名或路径中任意组件）
+        for name in Self.sensitiveNames {
+            if lowerComponents.contains(name) {
+                throw FileSandboxError.sensitiveFile
+            }
+        }
+
+        // 6b. 扩展名匹配（*.pem / *.key / *.p12 等）
+        if !lowerExtension.isEmpty, Self.sensitiveExtensions.contains(lowerExtension) {
+            throw FileSandboxError.sensitiveFile
+        }
+
+        // 6c. 需要结合父目录的上下文匹配（如 .docker/config.json、.kube/config）
+        for ctx in Self.sensitiveContextPaths {
+            if lowerParent == ctx.parent && lowerFilename == ctx.filename {
                 throw FileSandboxError.sensitiveFile
             }
         }

@@ -70,17 +70,21 @@ final class RelayBridge {
 
         // 检查是否是文件/浏览器操作消息（file.list / file.read / browser.screenshot）
         // 这类消息由本地处理器处理，不转发到 Unix socket
+        // 在后台线程执行，避免阻塞入站消息处理（与 Unix socket 转发路径保持一致）
         if let payloadDict = payload as? [String: Any],
            let method = payloadDict["method"] as? String,
            method == "file.list" || method == "file.read" || method == "browser.screenshot" {
             let params = payloadDict["params"] as? [String: Any]
-            let resultPayload = handleLocalMethod(method: method, params: params)
-            let responseEnvelope: [String: Any] = [
-                "id": requestID,
-                "payload": resultPayload,
-            ]
-            if let outData = try? JSONSerialization.data(withJSONObject: responseEnvelope) {
-                relayClient?.send(outData)
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else { return }
+                let resultPayload = self.handleLocalMethod(method: method, params: params)
+                let responseEnvelope: [String: Any] = [
+                    "id": requestID,
+                    "payload": resultPayload,
+                ]
+                if let outData = try? JSONSerialization.data(withJSONObject: responseEnvelope) {
+                    self.relayClient?.send(outData)
+                }
             }
             return
         }

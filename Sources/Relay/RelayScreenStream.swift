@@ -139,11 +139,18 @@ final class RelayScreenStream {
     private func readScreen(surfaceID: String, socketPath: String) -> String? {
         let command = "read_screen \(surfaceID)"
 
-        // 创建临时桥接对象来复用 socket I/O 逻辑
-        let tempBridge = RelayBridge(socketPath: socketPath)
-        guard let response = tempBridge.sendToUnixSocket(command) else {
-            return nil
+        // 优先复用已有的 bridge；若 bridge 不可用则直接用 socketPath 创建临时实例
+        // 避免在高频 tick 中每次分配新的 RelayBridge
+        let response: String?
+        if let existingBridge = bridge {
+            response = existingBridge.sendToUnixSocket(command)
+        } else {
+            // bridge 已释放时的兜底路径（不常见）
+            let fallback = RelayBridge(socketPath: socketPath)
+            response = fallback.sendToUnixSocket(command)
         }
+
+        guard let response else { return nil }
 
         // 格式：`OK {base64}` 或 `ERROR ...`
         guard response.hasPrefix("OK ") else { return nil }

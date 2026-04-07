@@ -45,6 +45,9 @@ final class RelayClient: NSObject {
     /// 是否主动断开（用于区分主动 stop 和异常断开）
     private var intentionalDisconnect = false
 
+    /// 串行队列，用于保护 webSocketTask / reconnectDelay / status / intentionalDisconnect 等共享状态
+    private let stateQueue = DispatchQueue(label: "com.cmux.relay.client.state")
+
     /// 当前连接状态
     private(set) var status: ConnectionStatus = .disconnected {
         didSet {
@@ -106,6 +109,8 @@ final class RelayClient: NSObject {
             return
         }
 
+        // 先释放旧 session，避免泄漏
+        urlSession?.invalidateAndCancel()
         let session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
         self.urlSession = session
         let task = session.webSocketTask(with: url)
@@ -164,21 +169,22 @@ final class RelayClient: NSObject {
             return
         }
 
-        // 计算 HMAC-SHA256
+        // 计算 HMAC-SHA256（消息格式：deviceID:nonce:timestamp，与服务端一致）
         let timestamp = String(Int(Date().timeIntervalSince1970))
-        let message_ = deviceID + nonce + timestamp
+        let message_ = deviceID + ":" + nonce + ":" + timestamp
 
         guard let hmacHex = computeHMAC(message: message_) else {
             handleConnectionFailure(error: RelayClientError.authFailed)
             return
         }
 
-        // 发送认证响应
+        // 发送认证响应（type 为 "auth"，字段与服务端协议对齐）
         let response: [String: Any] = [
-            "type": "auth_response",
+            "type": "auth",
             "device_id": deviceID,
+            "nonce": nonce,
             "timestamp": timestamp,
-            "hmac": hmacHex,
+            "signature": hmacHex,
         ]
 
         guard let responseData = try? JSONSerialization.data(withJSONObject: response),

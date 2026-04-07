@@ -118,17 +118,34 @@ final class RelayAgentApproval {
 
     /// 超时后自动拒绝
     private func handleTimeout(requestID: String) {
+        // 原子地从 pendingRequests 中移除，避免与 handleApprovalResponse 产生竞态
         lock.lock()
-        let approval = pendingRequests[requestID]
+        let approval = pendingRequests.removeValue(forKey: requestID)
         lock.unlock()
 
-        guard approval != nil else {
+        guard let approval else {
             // 已被响应处理，无需操作
             return
         }
 
-        // 自动拒绝
-        handleApprovalResponse(requestID: requestID, approved: false)
+        // 向对应 surface 发送拒绝（"n\n"），不再调用 handleApprovalResponse 以避免重复移除
+        let text = "n\n"
+        let rpcPayload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "method": "surface.send_text",
+            "params": [
+                "surface_id": approval.surfaceID,
+                "text": text,
+            ],
+            "id": UUID().uuidString,
+        ]
+        if let payloadData = try? JSONSerialization.data(withJSONObject: rpcPayload),
+           let payloadString = String(data: payloadData, encoding: .utf8) {
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else { return }
+                _ = self.bridge.sendToUnixSocket(payloadString)
+            }
+        }
 
         // 推送超时事件到 iOS
         let event: [String: Any] = [
