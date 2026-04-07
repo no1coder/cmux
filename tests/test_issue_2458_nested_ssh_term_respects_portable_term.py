@@ -28,11 +28,13 @@ WRAPPED_SSH_ARG_FRAGMENTS = (
 
 
 def _write_executable(path: Path, content: str) -> None:
+    """Create an executable helper script for the shell harness."""
     path.write_text(content, encoding="utf-8")
     path.chmod(0o755)
 
 
 def _write_prompting_zshrc(path: Path, extra_content: str = "") -> None:
+    """Write a minimal prompting zshrc for PTY-driven interactive runs."""
     path.write_text(
         (
             """
@@ -47,12 +49,16 @@ RPROMPT=''
 
 
 def _recorded_lines(path: Path) -> list[str]:
+    """Return non-empty lines recorded by the fake helper binaries."""
     if not path.exists():
         return []
     return [line for line in path.read_text(encoding="utf-8").splitlines() if line]
 
 
-def _run_prompted_shell(*, root: Path, zsh_path: str, env: dict[str, str]) -> tuple[bool, str]:
+def _run_prompted_shell(
+    *, root: Path, zsh_path: str, env: dict[str, str], shell_command: str
+) -> tuple[bool, str]:
+    """Drive an interactive prompted shell and run the requested command once."""
     master, slave = pty.openpty()
     proc = subprocess.Popen(
         [zsh_path, "-d", "-i"],
@@ -91,7 +97,7 @@ def _run_prompted_shell(*, root: Path, zsh_path: str, env: dict[str, str]) -> tu
                 saw_prompt = True
 
             if saw_prompt and not ssh_sent:
-                os.write(master, b"ssh nested.example\n")
+                os.write(master, f"{shell_command}\n".encode("utf-8"))
                 ssh_sent = True
                 continue
 
@@ -138,6 +144,7 @@ def _run_exec_string_shell(
     command_string: str,
     login_shell: bool,
 ) -> tuple[bool, str]:
+    """Run a one-shot interactive exec-string shell and return combined output."""
     argv = [zsh_path, "-d"]
     if login_shell:
         argv.append("-l")
@@ -168,11 +175,17 @@ def _run_case(
     expect_wrapper: bool,
     expected_target: str,
     mode: str = "prompted",
-    command_string: str = "ssh nested.example",
+    shell_command: str = "ssh nested.example",
     login_shell: bool = False,
     zprofile_extra_content: str = "",
     zshrc_extra_content: str = "",
+    ssh_g_output: str = "user nested\nhostname nested.example\n",
+    infocmp_status: int = 1,
+    infocmp_stdout: str = "",
+    expect_bootstrap: bool = False,
+    expected_bootstrap_fragments: tuple[str, ...] = (),
 ) -> tuple[bool, str]:
+    """Run one SSH-wrapper scenario and validate the recorded behavior."""
     base = Path(tempfile.mkdtemp(prefix="cmux_issue_2458_"))
     try:
         home = base / "home"
@@ -197,9 +210,8 @@ def _run_case(
             fakebin / "ssh",
             """#!/bin/sh
 if [ "$1" = "-G" ]; then
-  printf 'user nested\\n'
-  printf 'hostname nested.example\\n'
-  exit 0
+  printf '%b' "${CMUX_TEST_SSH_G_OUTPUT:-user nested\\nhostname nested.example\\n}"
+  exit "${CMUX_TEST_SSH_G_STATUS:-0}"
 fi
 printf '%s\\n' "${TERM:-}" >> "$CMUX_TEST_TERM_OUT"
 printf '%s\\n' "$*" >> "$CMUX_TEST_SSH_ARGS_OUT"
@@ -210,6 +222,7 @@ exit 0
             fakebin / "infocmp",
             """#!/bin/sh
 printf 'called\\n' >> "$CMUX_TEST_INFOCMP_OUT"
+printf '%s' "${CMUX_TEST_INFOCMP_STDOUT:-}"
 exit "${CMUX_TEST_INFOCMP_STATUS:-1}"
 """,
         )
@@ -230,19 +243,22 @@ exit "${CMUX_TEST_INFOCMP_STATUS:-1}"
         env["CMUX_TEST_TERM_OUT"] = str(term_out)
         env["CMUX_TEST_SSH_ARGS_OUT"] = str(args_out)
         env["CMUX_TEST_INFOCMP_OUT"] = str(infocmp_out)
-        env["CMUX_TEST_INFOCMP_STATUS"] = "1"
+        env["CMUX_TEST_INFOCMP_STATUS"] = str(infocmp_status)
+        env["CMUX_TEST_INFOCMP_STDOUT"] = infocmp_stdout
+        env["CMUX_TEST_SSH_G_OUTPUT"] = ssh_g_output
+        env["CMUX_TEST_SSH_G_STATUS"] = "0"
         env["CMUX_TEST_FAKEBIN"] = str(fakebin)
         env.pop("GHOSTTY_BIN_DIR", None)
         env.pop("TERMINFO", None)
 
         if mode == "prompted":
-            ok, detail = _run_prompted_shell(root=root, zsh_path=zsh_path, env=env)
+            ok, detail = _run_prompted_shell(root=root, zsh_path=zsh_path, env=env, shell_command=shell_command)
         elif mode == "exec_string":
             ok, detail = _run_exec_string_shell(
                 root=root,
                 zsh_path=zsh_path,
                 env=env,
-                command_string=command_string,
+                command_string=shell_command,
                 login_shell=login_shell,
             )
         else:
@@ -266,6 +282,16 @@ exit "${CMUX_TEST_INFOCMP_STATUS:-1}"
         if expected_target not in recorded_args_line:
             return False, f"expected ssh target {expected_target!r} in {recorded_args_line!r}"
 
+        bootstrap_args_line = next((line for line in recorded_args if "ControlMaster=yes" in line), None)
+        if expect_bootstrap and bootstrap_args_line is None:
+            return False, f"expected a bootstrap ssh invocation, recorded args were {recorded_args!r}"
+        if not expect_bootstrap and bootstrap_args_line is not None:
+            return False, f"unexpected bootstrap ssh invocation {bootstrap_args_line!r}"
+        if bootstrap_args_line is not None:
+            for fragment in expected_bootstrap_fragments:
+                if fragment not in bootstrap_args_line:
+                    return False, f"missing bootstrap fragment {fragment!r} in {bootstrap_args_line!r}"
+
         for fragment in WRAPPED_SSH_ARG_FRAGMENTS:
             fragment_present = fragment in recorded_args_line
             if expect_wrapper and not fragment_present:
@@ -283,10 +309,15 @@ exit "${CMUX_TEST_INFOCMP_STATUS:-1}"
 
 
 def main() -> int:
+    """Exercise prompted and exec-string SSH wrapper flows under zsh."""
     root = Path(__file__).resolve().parents[1]
     wrapper_dir = root / "Resources" / "shell-integration"
+    ghostty_integration = root / "ghostty" / "src" / "shell-integration" / "zsh" / "ghostty-integration"
     if not (wrapper_dir / ".zshenv").exists():
         print(f"SKIP: missing wrapper .zshenv at {wrapper_dir}")
+        return 0
+    if not ghostty_integration.exists():
+        print(f"SKIP: missing Ghostty zsh integration at {ghostty_integration}")
         return 0
 
     zsh_path = shutil.which("zsh")
@@ -353,6 +384,25 @@ def main() -> int:
     if not ok:
         print(f"FAIL: xterm-ghostty fallback case failed: {detail}")
         return 1
+    ok, detail = _run_case(
+        root=root,
+        wrapper_dir=wrapper_dir,
+        zsh_path=zsh_path,
+        features="ssh-env,ssh-terminfo",
+        term="xterm-ghostty",
+        expect_term="xterm-ghostty",
+        expect_infocmp=True,
+        expect_wrapper=True,
+        expected_target="nested.example",
+        expect_bootstrap=True,
+        expected_bootstrap_fragments=("-p 2222", "-J jumpbox", "-F /tmp/cmux-fake-ssh-config"),
+        shell_command="ssh -p 2222 -J jumpbox -F /tmp/cmux-fake-ssh-config nested.example",
+        infocmp_status=0,
+        infocmp_stdout="xterm-ghostty|Ghostty terminal\\n",
+    )
+    if not ok:
+        print(f"FAIL: bootstrap ssh option preservation case failed: {detail}")
+        return 1
 
     ok, detail = _run_case(
         root=root,
@@ -404,7 +454,7 @@ ssh() { command ssh "$@"; }
         expect_wrapper=False,
         expected_target="bootstrap-host",
         mode="exec_string",
-        command_string="true",
+        shell_command="true",
         login_shell=True,
         zprofile_extra_content="""
 ssh bootstrap-host

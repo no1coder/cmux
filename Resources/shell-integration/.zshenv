@@ -22,6 +22,7 @@
 builtin typeset -g _cmux_real_zdotdir=""
 builtin typeset -g _cmux_real_zdotdir_mode="unset"
 builtin typeset -g _cmux_wrapper_zdotdir="${ZDOTDIR-}"
+builtin typeset -g _cmux_wrapper_histfile=""
 builtin typeset -gi _cmux_use_exec_string_wrapper=0
 
 if [[ -n "${GHOSTTY_ZSH_ZDOTDIR+X}" ]]; then
@@ -33,6 +34,20 @@ elif [[ -n "${CMUX_ZSH_ZDOTDIR+X}" ]]; then
     _cmux_real_zdotdir_mode="set"
     builtin unset CMUX_ZSH_ZDOTDIR
 fi
+
+if [[ -n "$_cmux_wrapper_zdotdir" ]]; then
+    _cmux_wrapper_histfile="${_cmux_wrapper_zdotdir}/.zsh_history"
+fi
+
+_cmux_capture_real_zdotdir() {
+    if [[ -n "${ZDOTDIR+X}" ]]; then
+        _cmux_real_zdotdir="$ZDOTDIR"
+        _cmux_real_zdotdir_mode="set"
+    else
+        _cmux_real_zdotdir=""
+        _cmux_real_zdotdir_mode="unset"
+    fi
+}
 
 _cmux_use_real_zdotdir() {
     if [[ "$_cmux_real_zdotdir_mode" == "set" ]]; then
@@ -57,9 +72,15 @@ _cmux_source_real_zdotfile() {
     builtin local file_name="$1"
     builtin local path
 
-    _cmux_use_real_zdotdir
-    path="${ZDOTDIR-$HOME}/$file_name"
-    [[ ! -r "$path" ]] || builtin source -- "$path"
+    {
+        _cmux_use_real_zdotdir
+        path="${ZDOTDIR-$HOME}/$file_name"
+        [[ ! -r "$path" ]] || builtin source -- "$path"
+    } always {
+        # Preserve any user-side ZDOTDIR rebinding so the next startup file
+        # resolves from the same location vanilla zsh would use.
+        _cmux_capture_real_zdotdir
+    }
 }
 
 if [[ -o interactive && -n "${ZSH_EXECUTION_STRING:-}" ]]; then
@@ -71,6 +92,20 @@ fi
 
 {
     _cmux_source_real_zdotfile ".zshenv"
+
+    if [[ -o interactive \
+       && -z "${ZSH_EXECUTION_STRING:-}" \
+       && "${CMUX_SHELL_INTEGRATION:-1}" != "0" \
+       && -n "${CMUX_SHELL_INTEGRATION_DIR:-}" \
+       && -r "${CMUX_SHELL_INTEGRATION_DIR}/cmux-zsh-integration.zsh" \
+       && "${TERM:-}" == "xterm-256color" \
+       && -z "${CMUX_ZSH_RESTORE_TERM:-}" ]]; then
+        # Keep startup TERM-compatible prompt/theme selection during shell init,
+        # then restore the managed xterm-256color identity before the first
+        # interactive command executes.
+        builtin export CMUX_ZSH_RESTORE_TERM="$TERM"
+        builtin export TERM="xterm-ghostty"
+    fi
 } always {
     (( _cmux_use_exec_string_wrapper )) && _cmux_restore_wrapper_zdotdir
 
@@ -104,8 +139,8 @@ fi
     fi
 
     if (( ! _cmux_use_exec_string_wrapper )); then
-        builtin unfunction _cmux_use_real_zdotdir _cmux_restore_wrapper_zdotdir _cmux_source_real_zdotfile 2>/dev/null
-        builtin unset _cmux_real_zdotdir _cmux_real_zdotdir_mode _cmux_wrapper_zdotdir _cmux_use_exec_string_wrapper
+        builtin unfunction _cmux_capture_real_zdotdir _cmux_use_real_zdotdir _cmux_restore_wrapper_zdotdir _cmux_source_real_zdotfile 2>/dev/null
+        builtin unset _cmux_real_zdotdir _cmux_real_zdotdir_mode _cmux_wrapper_zdotdir _cmux_wrapper_histfile _cmux_use_exec_string_wrapper
     fi
 
     builtin unset _cmux_ghostty _cmux_ghostty_patch _cmux_integ

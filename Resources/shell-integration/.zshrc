@@ -12,13 +12,15 @@ if (( $+functions[_cmux_use_real_zdotdir] )); then
     _cmux_use_real_zdotdir
 fi
 
-# /etc/zshrc used the wrapper ZDOTDIR for exec-string shells. Restore the
-# user's history path now that startup-file chaining is complete.
-HISTFILE=${ZDOTDIR-$HOME}/.zsh_history
+# /etc/zshrc used the wrapper ZDOTDIR for exec-string shells. Repair only the
+# wrapper-derived default; preserve any HISTFILE the user chose explicitly.
+if [[ -n "${_cmux_wrapper_histfile:-}" && "${HISTFILE-}" == "$_cmux_wrapper_histfile" ]]; then
+    HISTFILE="${ZDOTDIR-$HOME}/.zsh_history"
+fi
 
 if (( $+functions[_cmux_patch_ghostty_ssh] )); then
     _cmux_patch_ghostty_ssh
 fi
 
-builtin unfunction _cmux_use_real_zdotdir _cmux_restore_wrapper_zdotdir _cmux_source_real_zdotfile 2>/dev/null
-builtin unset _cmux_real_zdotdir _cmux_real_zdotdir_mode _cmux_wrapper_zdotdir _cmux_use_exec_string_wrapper
+builtin unfunction _cmux_capture_real_zdotdir _cmux_use_real_zdotdir _cmux_restore_wrapper_zdotdir _cmux_source_real_zdotfile 2>/dev/null
+builtin unset _cmux_real_zdotdir _cmux_real_zdotdir_mode _cmux_wrapper_zdotdir _cmux_wrapper_histfile _cmux_use_exec_string_wrapper

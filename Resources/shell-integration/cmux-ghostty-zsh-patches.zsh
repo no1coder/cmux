@@ -32,9 +32,69 @@ _cmux_patch_ghostty_ssh() {
     # xterm-256color.
     if [[ "$GHOSTTY_SHELL_FEATURES" == *ssh-terminfo* && "$current_term" == "xterm-ghostty" ]]; then
       local ssh_user ssh_hostname ssh_target ssh_config_output ssh_config_status
+      local -a ssh_bootstrap_args
+      local ssh_arg ssh_bootstrap_option
+      local -i ssh_bootstrap_can_run ssh_bootstrap_expect_value ssh_bootstrap_target_seen
       ssh_user=""
       ssh_hostname=""
       ssh_target=""
+      ssh_bootstrap_args=()
+      ssh_bootstrap_option=""
+      ssh_bootstrap_can_run=1
+      ssh_bootstrap_expect_value=0
+      ssh_bootstrap_target_seen=0
+
+      # Preserve connection-affecting ssh arguments for the bootstrap hop, but
+      # drop any trailing remote command so the probe can run its own installer.
+      for ssh_arg in "$@"; do
+        if (( ssh_bootstrap_target_seen )); then
+          break
+        fi
+
+        if (( ssh_bootstrap_expect_value )); then
+          ssh_bootstrap_args+=("$ssh_arg")
+
+          case "$ssh_bootstrap_option" in
+            -O|-Q|-W) ssh_bootstrap_can_run=0 ;;
+          esac
+
+          ssh_bootstrap_expect_value=0
+          ssh_bootstrap_option=""
+          continue
+        fi
+
+        case "$ssh_arg" in
+          --)
+            ssh_bootstrap_args+=("$ssh_arg")
+            ;;
+          -G|-N|-V|-s)
+            ssh_bootstrap_can_run=0
+            ssh_bootstrap_args+=("$ssh_arg")
+            ;;
+          -O*|-Q*|-W*)
+            ssh_bootstrap_can_run=0
+            ssh_bootstrap_args+=("$ssh_arg")
+            ;;
+          -[BbCcDEeFIiJLlmOopQRSwW])
+            ssh_bootstrap_args+=("$ssh_arg")
+            ssh_bootstrap_expect_value=1
+            ssh_bootstrap_option="$ssh_arg"
+            ;;
+          -[BbCcDEeFIiJLlmOopQRSwW]?*)
+            ssh_bootstrap_args+=("$ssh_arg")
+            ;;
+          -?*)
+            ssh_bootstrap_args+=("$ssh_arg")
+            ;;
+          *)
+            ssh_bootstrap_args+=("$ssh_arg")
+            ssh_bootstrap_target_seen=1
+            ;;
+        esac
+      done
+
+      (( ssh_bootstrap_target_seen )) || ssh_bootstrap_can_run=0
+      (( ssh_bootstrap_expect_value )) && ssh_bootstrap_can_run=0
       ssh_config_output=$(command ssh -G "$@" 2>&1)
       ssh_config_status=$?
 
@@ -69,10 +129,10 @@ _cmux_patch_ghostty_ssh() {
               command mkdir -p -- "$ssh_cpath_dir" >/dev/null 2>&1 || ssh_cpath_dir=""
             fi
 
-            if [[ -n "$ssh_cpath_dir" ]]; then
+            if (( ssh_bootstrap_can_run )) && [[ -n "$ssh_cpath_dir" ]]; then
               ssh_cpath="$ssh_cpath_dir/socket"
 
-              if builtin print -r "$ssh_terminfo" | command ssh "${ssh_opts[@]}" -o ControlMaster=yes -o ControlPath="$ssh_cpath" -o ControlPersist=60s "$ssh_target" '
+              if builtin print -r "$ssh_terminfo" | command ssh "${ssh_opts[@]}" -o ControlMaster=yes -o ControlPath="$ssh_cpath" -o ControlPersist=60s "${ssh_bootstrap_args[@]}" '
                 infocmp xterm-ghostty >/dev/null 2>&1 && exit 0
                 command -v tic >/dev/null 2>&1 || exit 1
                 mkdir -p ~/.terminfo 2>/dev/null && tic -x - 2>/dev/null && exit 0
@@ -88,7 +148,7 @@ _cmux_patch_ghostty_ssh() {
               else
                 print "Warning: Failed to install terminfo." >&2
               fi
-            else
+            elif [[ -z "$ssh_cpath_dir" ]]; then
               print "Warning: Failed to create temporary ssh control directory." >&2
             fi
           else
