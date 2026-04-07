@@ -124,13 +124,12 @@ final class RelayScreenStream {
         guard hasChanged else { return }
 
         // 推送 screen.snapshot 事件
-        let event: [String: Any] = [
-            "type": "screen.snapshot",
+        let payload: [String: Any] = [
             "surface_id": surfaceID,
             "lines": lines,
             "timestamp": Int(Date().timeIntervalSince1970 * 1000),
         ]
-        bridge?.pushEvent(event)
+        bridge?.pushEvent("screen.snapshot", payload: payload)
     }
 
     // MARK: - 读取屏幕

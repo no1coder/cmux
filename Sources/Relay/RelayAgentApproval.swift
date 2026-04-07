@@ -65,8 +65,7 @@ final class RelayAgentApproval {
         lock.unlock()
 
         // 推送审批请求事件到 iOS
-        let event: [String: Any] = [
-            "type": "agent.approval_request",
+        let payload: [String: Any] = [
             "request_id": requestID,
             "surface_id": surfaceID,
             "agent": agent,
@@ -75,7 +74,7 @@ final class RelayAgentApproval {
             "timeout_seconds": timeoutSeconds,
             "timestamp": Int(Date().timeIntervalSince1970 * 1000),
         ]
-        bridge.pushEvent(event)
+        bridge.pushEvent("agent.approval_required", payload: payload)
 
         // 启动超时定时器（5 分钟后自动拒绝）
         DispatchQueue.global(qos: .utility).asyncAfter(
@@ -104,14 +103,13 @@ final class RelayAgentApproval {
         sendTextToSurface(surfaceID: approval.surfaceID, text: text)
 
         // 推送审批结果事件到 iOS
-        let event: [String: Any] = [
-            "type": "agent.approval_resolved",
+        let resolvedPayload: [String: Any] = [
             "request_id": requestID,
             "surface_id": approval.surfaceID,
             "approved": approved,
             "timestamp": Int(Date().timeIntervalSince1970 * 1000),
         ]
-        bridge.pushEvent(event)
+        bridge.pushEvent("agent.approval_resolved", payload: resolvedPayload)
     }
 
     // MARK: - 私有方法
@@ -148,12 +146,11 @@ final class RelayAgentApproval {
         }
 
         // 推送超时事件到 iOS
-        let event: [String: Any] = [
-            "type": "agent.approval_timeout",
+        let timeoutPayload: [String: Any] = [
             "request_id": requestID,
             "timestamp": Int(Date().timeIntervalSince1970 * 1000),
         ]
-        bridge.pushEvent(event)
+        bridge.pushEvent("agent.approval_timeout", payload: timeoutPayload)
     }
 
     /// 构造 JSON-RPC surface.send_text 请求并写入 Unix socket

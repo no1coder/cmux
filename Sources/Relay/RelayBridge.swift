@@ -3,7 +3,7 @@ import Foundation
 // MARK: - RelayBridge
 
 /// 将 WebSocket 消息桥接到本地 cmux Unix socket（JSON-RPC）
-/// 负责：解析 WebSocket 信封 → 转发到本地 socket → 包装响应回传
+/// 负责：解析 Relay Envelope → 转发到本地 socket → 包装响应回传
 final class RelayBridge {
 
     // MARK: - 属性
@@ -31,115 +31,209 @@ final class RelayBridge {
 
     // MARK: - 入站消息处理（手机 → Mac）
 
-    /// 处理来自 RelayClient 的原始 Data
-    /// - 解析信封，提取 JSON-RPC payload
-    /// - 发送到本地 Unix socket，读取响应
-    /// - 包装响应并通过 relay 回传
+    /// 处理来自 RelayClient 的原始 Data（Relay Envelope 格式）
+    /// Envelope 格式：{ seq, ts, from, type, payload }
     func handleIncoming(_ data: Data) {
         guard let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return
         }
 
-        // 提取请求信封字段
-        guard let requestID = envelope["id"] as? String,
-              let payload = envelope["payload"] else {
+        // 解析 Envelope 字段
+        let msgType = envelope["type"] as? String ?? ""
+        let seq = envelope["seq"] as? UInt64 ?? 0
+
+        // 提取 payload（RPC 请求的实际内容）
+        guard let payload = envelope["payload"] as? [String: Any] else {
+            // 非 RPC 消息（如 resume），忽略
             return
         }
 
-        // 检查是否是代理审批响应消息（agent.approve / agent.reject）
-        // 这类消息不转发到本地 socket，而是由 agentApproval 处理
-        if let payloadDict = payload as? [String: Any],
-           let method = payloadDict["method"] as? String,
-           method == "agent.approve" || method == "agent.reject" {
-            let approved = method == "agent.approve"
-            let params = payloadDict["params"] as? [String: Any]
-            let approvalRequestID = params?["request_id"] as? String ?? requestID
+        let method = payload["method"] as? String ?? ""
+        let params = payload["params"] as? [String: Any]
+        // 请求 ID（优先使用 payload 中的 id，兼容不同格式）
+        let requestID = payload["id"] as? Int ?? Int(seq)
 
-            agentApproval?.handleApprovalResponse(requestID: approvalRequestID, approved: approved)
-
-            // 回传成功响应信封
-            let successEnvelope: [String: Any] = [
-                "id": requestID,
-                "payload": ["ok": true],
-            ]
-            if let outData = try? JSONSerialization.data(withJSONObject: successEnvelope) {
-                relayClient?.send(outData)
-            }
-            return
-        }
-
-        // 检查是否是文件/浏览器操作消息（file.list / file.read / browser.screenshot）
-        // 这类消息由本地处理器处理，不转发到 Unix socket
-        // 在后台线程执行，避免阻塞入站消息处理（与 Unix socket 转发路径保持一致）
-        if let payloadDict = payload as? [String: Any],
-           let method = payloadDict["method"] as? String,
-           method == "file.list" || method == "file.read" || method == "browser.screenshot" {
-            let params = payloadDict["params"] as? [String: Any]
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                guard let self else { return }
-                let resultPayload = self.handleLocalMethod(method: method, params: params)
-                let responseEnvelope: [String: Any] = [
-                    "id": requestID,
-                    "payload": resultPayload,
-                ]
-                if let outData = try? JSONSerialization.data(withJSONObject: responseEnvelope) {
-                    self.relayClient?.send(outData)
-                }
-            }
-            return
-        }
-
-        // 将 payload 序列化为 JSON-RPC 请求
-        guard let payloadData = try? JSONSerialization.data(withJSONObject: payload),
-              let payloadString = String(data: payloadData, encoding: .utf8) else {
-            return
-        }
-
-        // 通过 Unix socket 发送并读取响应（在后台线程执行，避免阻塞）
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            let responseString = self.sendToUnixSocket(payloadString)
-            let responseData = responseString?.data(using: .utf8)
-
-            // 包装响应信封并回传
-            let responsePayload: Any
-            if let responseData,
-               let parsed = try? JSONSerialization.jsonObject(with: responseData) {
-                responsePayload = parsed
-            } else {
-                // 无响应或解析失败时返回空对象
-                responsePayload = [String: Any]()
-            }
-
-            let responseEnvelope: [String: Any] = [
-                "id": requestID,
-                "payload": responsePayload,
-            ]
-
-            guard let outData = try? JSONSerialization.data(withJSONObject: responseEnvelope) else {
-                return
-            }
-            self.relayClient?.send(outData)
+        switch msgType {
+        case "rpc_request":
+            handleRPCRequest(method: method, params: params, requestID: requestID)
+        default:
+            // 其他消息类型（resume 等由 relay 服务器处理）
+            break
         }
     }
 
-    // MARK: - 出站事件推送（Mac → iOS）
+    // MARK: - RPC 请求路由
 
-    /// 推送 Mac 端产生的事件到手机
-    func pushEvent(_ event: [String: Any]) {
-        guard let data = try? JSONSerialization.data(withJSONObject: event) else {
+    /// 根据 method 路由到不同处理器
+    private func handleRPCRequest(method: String, params: [String: Any]?, requestID: Int) {
+        switch method {
+        // Agent 审批
+        case "agent.approve", "agent.reject":
+            let approved = method == "agent.approve"
+            let approvalRequestID = params?["request_id"] as? String ?? ""
+            agentApproval?.handleApprovalResponse(requestID: approvalRequestID, approved: approved)
+            sendRPCResponse(requestID: requestID, result: ["ok": true])
+
+        // 文件操作
+        case "file.list", "file.read":
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else { return }
+                let result = self.handleLocalMethod(method: method, params: params)
+                self.sendRPCResponse(requestID: requestID, result: result)
+            }
+
+        // 浏览器截图
+        case "browser.screenshot":
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else { return }
+                let result = self.handleLocalMethod(method: method, params: params)
+                self.sendRPCResponse(requestID: requestID, result: result)
+            }
+
+        // 终端命令（转发到本地 Unix socket）
+        default:
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else { return }
+                self.forwardToSocket(method: method, params: params, requestID: requestID)
+            }
+        }
+    }
+
+    // MARK: - 转发到本地 Socket
+
+    /// 将 RPC 请求转发到本地 cmux Unix socket，返回结果
+    private func forwardToSocket(method: String, params: [String: Any]?, requestID: Int) {
+        // 构造 JSON-RPC 请求
+        var rpcRequest: [String: Any] = [
+            "jsonrpc": "2.0",
+            "method": method,
+            "id": requestID,
+        ]
+        if let params {
+            rpcRequest["params"] = params
+        }
+
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: rpcRequest),
+              let jsonString = String(data: jsonData, encoding: .utf8) else {
+            sendRPCResponse(requestID: requestID, result: ["error": "请求序列化失败"])
+            return
+        }
+
+        // 发送到 Unix socket
+        guard let responseString = sendToUnixSocket(jsonString) else {
+            sendRPCResponse(requestID: requestID, result: ["error": "socket 通信失败"])
+            return
+        }
+
+        // 解析响应
+        if let responseData = responseString.data(using: .utf8),
+           let parsed = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any] {
+            // JSON-RPC 响应可能有 result 或 error 字段
+            if let result = parsed["result"] {
+                sendRPCResponse(requestID: requestID, result: ["result": result])
+            } else if let error = parsed["error"] {
+                sendRPCResponse(requestID: requestID, result: ["error": error])
+            } else {
+                sendRPCResponse(requestID: requestID, result: parsed)
+            }
+        } else {
+            // V1 协议文本响应
+            sendRPCResponse(requestID: requestID, result: ["text": responseString])
+        }
+    }
+
+    // MARK: - 响应发送
+
+    /// 发送 RPC 响应（Envelope 格式）回手机端
+    private func sendRPCResponse(requestID: Int, result: [String: Any]) {
+        var responsePayload = result
+        responsePayload["id"] = requestID
+
+        let envelope: [String: Any] = [
+            "seq": 0,
+            "ts": Int64(Date().timeIntervalSince1970),
+            "from": "mac",
+            "type": "rpc_response",
+            "payload": responsePayload,
+        ]
+
+        guard let data = try? JSONSerialization.data(withJSONObject: envelope) else {
             return
         }
         relayClient?.send(data)
     }
 
+    // MARK: - 出站事件推送（Mac → iOS）
+
+    /// 推送 Mac 端产生的事件到手机（Envelope 格式）
+    func pushEvent(_ eventType: String, payload: [String: Any]) {
+        var eventPayload = payload
+        eventPayload["event"] = eventType
+
+        let envelope: [String: Any] = [
+            "seq": 0,
+            "ts": Int64(Date().timeIntervalSince1970),
+            "from": "mac",
+            "type": "event",
+            "payload": eventPayload,
+        ]
+
+        guard let data = try? JSONSerialization.data(withJSONObject: envelope) else {
+            return
+        }
+        relayClient?.send(data)
+    }
+
+    /// 推送 surface 列表到手机端
+    func pushSurfaceList() {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+
+            // 通过 V2 JSON-RPC 获取 surface 列表
+            let request: [String: Any] = [
+                "jsonrpc": "2.0",
+                "method": "surface.list",
+                "id": 1,
+            ]
+            guard let jsonData = try? JSONSerialization.data(withJSONObject: request),
+                  let jsonString = String(data: jsonData, encoding: .utf8),
+                  let response = self.sendToUnixSocket(jsonString),
+                  let responseData = response.data(using: .utf8),
+                  let parsed = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+                  let result = parsed["result"] else {
+                return
+            }
+
+            self.pushEvent("surface.list_update", payload: ["surfaces": result])
+        }
+    }
+
+    /// 推送 workspace 列表到手机端
+    func pushWorkspaceList() {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+
+            let request: [String: Any] = [
+                "jsonrpc": "2.0",
+                "method": "workspace.list",
+                "id": 2,
+            ]
+            guard let jsonData = try? JSONSerialization.data(withJSONObject: request),
+                  let jsonString = String(data: jsonData, encoding: .utf8),
+                  let response = self.sendToUnixSocket(jsonString),
+                  let responseData = response.data(using: .utf8),
+                  let parsed = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+                  let result = parsed["result"] else {
+                return
+            }
+
+            self.pushEvent("workspace.list_update", payload: ["workspaces": result])
+        }
+    }
+
     // MARK: - 本地方法路由
 
     /// 路由文件/浏览器操作方法到对应处理器
-    /// - Parameters:
-    ///   - method: 方法名（file.list / file.read / browser.screenshot）
-    ///   - params: 请求参数
-    /// - Returns: 响应字典
     private func handleLocalMethod(method: String, params: [String: Any]?) -> [String: Any] {
         switch method {
         case "file.list":
@@ -205,21 +299,16 @@ final class RelayBridge {
     // MARK: - Unix Socket I/O
 
     /// 发送 V1 文本命令到本地 Unix socket，返回响应字符串
-    /// - 适用于非 JSON-RPC 的 V1 文本协议命令（如 screenshot、read_screen）
-    /// - 命令格式：纯文本 + 换行符；响应格式：`OK ...` 或 `ERROR ...`
     func sendV1Command(_ command: String) -> String? {
         return sendToUnixSocket(command)
     }
 
     /// 发送 JSON 字符串到本地 Unix socket，返回响应字符串
-    /// - 使用 AF_UNIX SOCK_STREAM，发送内容 + 换行符，读取响应直到换行
     func sendToUnixSocket(_ json: String) -> String? {
-        // 创建 socket fd
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
         defer { close(fd) }
 
-        // 构造 sockaddr_un
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
 
@@ -233,7 +322,6 @@ final class RelayBridge {
             }
         }
 
-        // 连接
         let connectResult = withUnsafePointer(to: &addr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
                 connect(fd, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
@@ -241,7 +329,6 @@ final class RelayBridge {
         }
         guard connectResult == 0 else { return nil }
 
-        // 发送 JSON + 换行
         let payload = json + "\n"
         guard let payloadData = payload.data(using: .utf8) else { return nil }
 
@@ -250,9 +337,9 @@ final class RelayBridge {
         }
         guard sendResult == payloadData.count else { return nil }
 
-        // 读取响应直到换行符
+        // 读取响应（增大缓冲区到 64KB）
         var responseBuffer = Data()
-        var readBuf = [UInt8](repeating: 0, count: 4096)
+        var readBuf = [UInt8](repeating: 0, count: 65536)
 
         while true {
             let bytesRead = recv(fd, &readBuf, readBuf.count, 0)
