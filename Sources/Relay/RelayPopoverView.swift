@@ -19,7 +19,7 @@ struct RelayPopoverView: View {
             // 标题栏
             HStack {
                 Image(systemName: "iphone")
-                Text(String(localized: "relay.title", defaultValue: "Mobile Remote Access"))
+                Text(String(localized: "relay.title", defaultValue: "手机远程访问"))
                     .font(.headline)
                 Spacer()
             }
@@ -53,14 +53,14 @@ struct RelayPopoverView: View {
                 .foregroundStyle(.secondary)
                 .padding(.top, 16)
 
-            Text(String(localized: "relay.unconfigured.hint", defaultValue: "Enter relay server address to get started"))
+            Text(String(localized: "relay.unconfigured.hint", defaultValue: "请输入中继服务器地址"))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
             serverURLField
 
-            Button(String(localized: "relay.save", defaultValue: "Save")) {
+            Button(String(localized: "relay.save", defaultValue: "保存")) {
                 stateModel.saveServerURL()
             }
             .disabled(stateModel.serverURLInput.isEmpty)
@@ -74,7 +74,7 @@ struct RelayPopoverView: View {
     private var unpairedView: some View {
         VStack(spacing: 12) {
             statusRow(
-                String(localized: "relay.status.unpaired", defaultValue: "Not Paired"),
+                String(localized: "relay.status.unpaired", defaultValue: "未配对"),
                 color: .secondary
             )
 
@@ -84,7 +84,7 @@ struct RelayPopoverView: View {
 
             Button(action: { stateModel.generateQRCode() }) {
                 Label(
-                    String(localized: "relay.generateQR", defaultValue: "Generate Pairing QR Code"),
+                    String(localized: "relay.generateQR", defaultValue: "生成配对二维码"),
                     systemImage: "qrcode"
                 )
                 .frame(maxWidth: .infinity)
@@ -93,7 +93,7 @@ struct RelayPopoverView: View {
             .padding(.horizontal, 16)
             .padding(.bottom, 16)
 
-            Text(String(localized: "relay.pairing.hint", defaultValue: "Scan the QR code with the cmux mobile app to pair"))
+            Text(String(localized: "relay.pairing.hint", defaultValue: "使用 cmux 手机 App 扫码配对"))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 16)
@@ -118,11 +118,11 @@ struct RelayPopoverView: View {
                     .padding(.top, 16)
             }
 
-            Text(String(localized: "relay.pairing.scan", defaultValue: "Scan with cmux mobile app"))
+            Text(String(localized: "relay.pairing.scan", defaultValue: "使用 cmux 手机 App 扫描"))
                 .font(.callout)
 
             if stateModel.pairingTimeRemaining > 0 {
-                Text(String(localized: "relay.pairing.expires", defaultValue: "Expires in \(stateModel.pairingTimeRemaining)s"))
+                Text(String(localized: "relay.pairing.expires", defaultValue: "\(stateModel.pairingTimeRemaining)秒后过期"))
                     .font(.caption)
                     .foregroundStyle(stateModel.pairingTimeRemaining < 60 ? .red : .secondary)
                     .monospacedDigit()
@@ -135,7 +135,7 @@ struct RelayPopoverView: View {
                     .foregroundStyle(.red)
             }
 
-            Button(String(localized: "relay.cancel", defaultValue: "Cancel")) {
+            Button(String(localized: "relay.cancel", defaultValue: "取消")) {
                 stateModel.cancelPairing()
             }
             .padding(.bottom, 16)
@@ -152,7 +152,7 @@ struct RelayPopoverView: View {
 
                 if let phoneName = stateModel.pairedPhoneName {
                     HStack {
-                        Text(String(localized: "relay.device", defaultValue: "Device"))
+                        Text(String(localized: "relay.device", defaultValue: "设备"))
                             .foregroundStyle(.secondary)
                         Spacer()
                         Text(phoneName)
@@ -163,7 +163,7 @@ struct RelayPopoverView: View {
 
                 if let latency = stateModel.latencyMs, stateModel.isConnected {
                     HStack {
-                        Text(String(localized: "relay.latency", defaultValue: "Latency"))
+                        Text(String(localized: "relay.latency", defaultValue: "延迟"))
                             .foregroundStyle(.secondary)
                         Spacer()
                         Text("\(latency)ms")
@@ -177,9 +177,18 @@ struct RelayPopoverView: View {
 
             Divider()
 
-            // 服务器地址
-            serverURLField
-                .padding(.vertical, 8)
+            // 服务器地址（已配对时只读显示）
+            HStack {
+                Text(String(localized: "relay.server", defaultValue: "服务器"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(stateModel.serverURLInput)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.primary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
 
             Divider()
 
@@ -190,7 +199,7 @@ struct RelayPopoverView: View {
                     get: { stateModel.isEnabled },
                     set: { stateModel.toggleEnabled($0) }
                 )) {
-                    Text(String(localized: "relay.enabled", defaultValue: "Enabled"))
+                    Text(String(localized: "relay.enabled", defaultValue: "启用"))
                         .font(.caption)
                 }
                 .toggleStyle(.switch)
@@ -199,7 +208,7 @@ struct RelayPopoverView: View {
 
                 Spacer()
 
-                Button(String(localized: "relay.unpair", defaultValue: "Unpair"), role: .destructive) {
+                Button(String(localized: "relay.unpair", defaultValue: "解除配对"), role: .destructive) {
                     stateModel.showUnpairConfirm = true
                 }
                 .font(.caption)
@@ -209,15 +218,15 @@ struct RelayPopoverView: View {
             .padding(.vertical, 12)
         }
         .alert(
-            String(localized: "relay.unpair.confirm.title", defaultValue: "Confirm Unpair?"),
+            String(localized: "relay.unpair.confirm.title", defaultValue: "确认解除配对？"),
             isPresented: $stateModel.showUnpairConfirm
         ) {
-            Button(String(localized: "relay.unpair.confirm.action", defaultValue: "Unpair"), role: .destructive) {
+            Button(String(localized: "relay.unpair.confirm.action", defaultValue: "解除配对"), role: .destructive) {
                 stateModel.unpair()
             }
-            Button(String(localized: "relay.unpair.confirm.cancel", defaultValue: "Cancel"), role: .cancel) {}
+            Button(String(localized: "relay.unpair.confirm.cancel", defaultValue: "取消"), role: .cancel) {}
         } message: {
-            Text(String(localized: "relay.unpair.confirm.message", defaultValue: "You will need to scan the QR code again to reconnect"))
+            Text(String(localized: "relay.unpair.confirm.message", defaultValue: "解除后需要重新扫码才能连接"))
         }
     }
 
@@ -238,7 +247,7 @@ struct RelayPopoverView: View {
 
     private var serverURLField: some View {
         HStack {
-            Text(String(localized: "relay.server", defaultValue: "Server"))
+            Text(String(localized: "relay.server", defaultValue: "服务器"))
                 .font(.caption)
                 .foregroundStyle(.secondary)
             TextField("host:port", text: $stateModel.serverURLInput)
@@ -330,15 +339,15 @@ final class RelayStateModel: ObservableObject {
 
     var connectionStatusText: String {
         if !isEnabled {
-            return String(localized: "relay.status.paused", defaultValue: "Paused")
+            return String(localized: "relay.status.paused", defaultValue: "已暂停")
         }
         switch RelayBootstrap.shared.client?.status {
         case .connected:
-            return String(localized: "relay.status.connected", defaultValue: "Connected")
+            return String(localized: "relay.status.connected", defaultValue: "已连接")
         case .connecting:
-            return String(localized: "relay.status.connecting", defaultValue: "Connecting...")
+            return String(localized: "relay.status.connecting", defaultValue: "连接中...")
         default:
-            return String(localized: "relay.status.disconnected", defaultValue: "Disconnected")
+            return String(localized: "relay.status.disconnected", defaultValue: "未连接")
         }
     }
 
@@ -397,7 +406,7 @@ final class RelayStateModel: ObservableObject {
         let scheme = serverURL.hasPrefix("localhost") || serverURL.hasPrefix("127.0.0.1") ? "http" : "https"
         guard let url = URL(string: "\(scheme)://\(serverURL)/api/pair/init") else {
             // Issue 6: 本地化错误消息
-            error = String(localized: "relay.error.invalidURL", defaultValue: "Invalid server address")
+            error = String(localized: "relay.error.invalidURL", defaultValue: "服务器地址无效")
             viewState = .unpaired
             return
         }
@@ -427,7 +436,7 @@ final class RelayStateModel: ObservableObject {
                       let checkToken = json["check_token"] as? String
                 else {
                     // Issue 6: 本地化错误消息
-                    self.error = String(localized: "relay.error.serverError", defaultValue: "Server response error")
+                    self.error = String(localized: "relay.error.serverError", defaultValue: "服务器响应错误")
                     self.viewState = .unpaired
                     return
                 }
@@ -479,6 +488,16 @@ final class RelayStateModel: ObservableObject {
 
     func unpair() {
         guard let phoneID = RelaySettings.pairedPhoneID else { return }
+
+        // 通知 relay 服务器删除配对（服务器会通知手机端）
+        if let serverURL = RelaySettings.serverURL, !serverURL.isEmpty {
+            let scheme = serverURL.hasPrefix("localhost") || serverURL.hasPrefix("127.0.0.1") ? "http" : "https"
+            if let url = URL(string: "\(scheme)://\(serverURL)/api/pair/\(phoneID)") {
+                var request = URLRequest(url: url)
+                request.httpMethod = "DELETE"
+                URLSession.shared.dataTask(with: request).resume()
+            }
+        }
 
         // 停止连接
         RelayBootstrap.shared.stop()
