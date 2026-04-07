@@ -1257,17 +1257,24 @@ final class BrowserPasskeyAuthorizationSupportTests: XCTestCase {
                 url: URL(string: "http://[::1]:8443")
             )
         )
+        // BrowserPanel.remoteProxyLoopbackAliasURL rewrites local pages on
+        // remote workspaces to this host, so it must be treated as loopback.
+        XCTAssertTrue(
+            BrowserPasskeyAuthorizationSupport.isPotentiallyTrustworthy(
+                url: URL(string: "http://cmux-loopback.localtest.me/login")
+            )
+        )
+        XCTAssertTrue(
+            BrowserPasskeyAuthorizationSupport.isPotentiallyTrustworthy(
+                url: URL(string: "http://app.cmux-loopback.localtest.me/login")
+            )
+        )
     }
 
     func testPotentiallyTrustworthyWebAuthnURLRejectsUnsupportedOrigins() {
         XCTAssertFalse(
             BrowserPasskeyAuthorizationSupport.isPotentiallyTrustworthy(
                 url: URL(string: "http://example.com/login")
-            )
-        )
-        XCTAssertFalse(
-            BrowserPasskeyAuthorizationSupport.isPotentiallyTrustworthy(
-                url: URL(string: "http://cmux-loopback.localtest.me")
             )
         )
         XCTAssertFalse(
@@ -1332,6 +1339,25 @@ final class BrowserPasskeyAuthorizationSupportTests: XCTestCase {
                 hasPendingRequest: false,
                 didPromptThisSession: false
             )
+        )
+    }
+
+    func testRedactedURLDescriptionStripsPathAndQuery() {
+        XCTAssertEqual(
+            BrowserPasskeyAuthorizationSupport.redactedURLDescription(
+                for: URL(string: "https://login.example.com/oauth?code=secret&state=token")
+            ),
+            "https://login.example.com"
+        )
+        XCTAssertEqual(
+            BrowserPasskeyAuthorizationSupport.redactedURLDescription(
+                for: URL(string: "http://localhost:3000/path?token=abc")
+            ),
+            "http://localhost"
+        )
+        XCTAssertEqual(
+            BrowserPasskeyAuthorizationSupport.redactedURLDescription(for: nil),
+            "nil"
         )
     }
 }
