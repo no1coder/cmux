@@ -17,6 +17,12 @@ final class RelayBridge {
     /// 代理审批路由器（处理 agent.approve / agent.reject 消息）
     var agentApproval: RelayAgentApproval?
 
+    /// 文件操作处理器（处理 file.list / file.read 消息）
+    var fileHandler: RelayFileHandler?
+
+    /// 浏览器操作处理器（处理 browser.screenshot 消息）
+    var browserHandler: RelayBrowserHandler?
+
     // MARK: - 初始化
 
     init(socketPath: String) {
@@ -57,6 +63,23 @@ final class RelayBridge {
                 "payload": ["ok": true],
             ]
             if let outData = try? JSONSerialization.data(withJSONObject: successEnvelope) {
+                relayClient?.send(outData)
+            }
+            return
+        }
+
+        // 检查是否是文件/浏览器操作消息（file.list / file.read / browser.screenshot）
+        // 这类消息由本地处理器处理，不转发到 Unix socket
+        if let payloadDict = payload as? [String: Any],
+           let method = payloadDict["method"] as? String,
+           method == "file.list" || method == "file.read" || method == "browser.screenshot" {
+            let params = payloadDict["params"] as? [String: Any]
+            let resultPayload = handleLocalMethod(method: method, params: params)
+            let responseEnvelope: [String: Any] = [
+                "id": requestID,
+                "payload": resultPayload,
+            ]
+            if let outData = try? JSONSerialization.data(withJSONObject: responseEnvelope) {
                 relayClient?.send(outData)
             }
             return
@@ -106,7 +129,83 @@ final class RelayBridge {
         relayClient?.send(data)
     }
 
+    // MARK: - 本地方法路由
+
+    /// 路由文件/浏览器操作方法到对应处理器
+    /// - Parameters:
+    ///   - method: 方法名（file.list / file.read / browser.screenshot）
+    ///   - params: 请求参数
+    /// - Returns: 响应字典
+    private func handleLocalMethod(method: String, params: [String: Any]?) -> [String: Any] {
+        switch method {
+        case "file.list":
+            guard let path = params?["path"] as? String else {
+                return ["error": "缺少 path 参数"]
+            }
+            guard let handler = fileHandler else {
+                return ["error": "文件处理器未初始化"]
+            }
+            do {
+                return try handler.listDirectory(path: path)
+            } catch let error as FileSandboxError {
+                return ["error": sandboxErrorMessage(error)]
+            } catch {
+                return ["error": error.localizedDescription]
+            }
+
+        case "file.read":
+            guard let path = params?["path"] as? String else {
+                return ["error": "缺少 path 参数"]
+            }
+            guard let handler = fileHandler else {
+                return ["error": "文件处理器未初始化"]
+            }
+            do {
+                return try handler.readFile(path: path)
+            } catch let error as FileSandboxError {
+                return ["error": sandboxErrorMessage(error)]
+            } catch {
+                return ["error": error.localizedDescription]
+            }
+
+        case "browser.screenshot":
+            guard let surfaceID = params?["surface_id"] as? String else {
+                return ["error": "缺少 surface_id 参数"]
+            }
+            guard let handler = browserHandler else {
+                return ["error": "浏览器处理器未初始化"]
+            }
+            return handler.captureScreenshot(surfaceID: surfaceID)
+
+        default:
+            return ["error": "未知方法: \(method)"]
+        }
+    }
+
+    /// 将沙箱错误转换为用户友好的错误信息
+    private func sandboxErrorMessage(_ error: FileSandboxError) -> String {
+        switch error {
+        case .pathOutsideAllowedRoot:
+            return "路径不在允许的目录范围内"
+        case .pathTraversal:
+            return "路径包含非法的路径穿越字符"
+        case .symbolicLinkEscape:
+            return "符号链接目标超出允许的目录范围"
+        case .sensitiveFile:
+            return "拒绝访问敏感文件"
+        case .fileNotFound:
+            return "文件不存在"
+        }
+    }
+
     // MARK: - Unix Socket I/O
+
+    /// 发送 V1 文本命令到本地 Unix socket，返回响应字符串
+    /// - 适用于非 JSON-RPC 的 V1 文本协议命令（如 screenshot、read_screen）
+    /// - 命令格式：纯文本 + 换行符；响应格式：`OK ...` 或 `ERROR ...`
+    func sendV1Command(_ command: String) -> String? {
+        return sendToUnixSocket(command)
+    }
 
     /// 发送 JSON 字符串到本地 Unix socket，返回响应字符串
     /// - 使用 AF_UNIX SOCK_STREAM，发送内容 + 换行符，读取响应直到换行
