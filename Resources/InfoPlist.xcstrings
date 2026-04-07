@@ -2,6 +2,23 @@
   "sourceLanguage": "en",
   "version": "1.0",
   "strings": {
+    "NSBluetoothAlwaysUsageDescription": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "cmux uses Bluetooth for cross-device passkey sign-in in embedded browser authentication flows."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "cmux は内蔵ブラウザの認証フローでクロスデバイスのパスキーサインインに Bluetooth を使用します。"
+          }
+        }
+      }
+    },
     "NSCameraUsageDescription": {
       "extractionState": "manual",
       "localizations": {

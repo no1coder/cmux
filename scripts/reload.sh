@@ -430,7 +430,7 @@ if [[ -n "$TAG" && "$APP_NAME" != "$SEARCH_APP_NAME" ]]; then
         rm -f "$CMUX_SOCKET"
       fi
     fi
-    /usr/bin/codesign --force --sign - --timestamp=none --generate-entitlement-der "$TAG_APP_PATH" >/dev/null 2>&1 || true
+    /usr/bin/codesign --force --sign - --timestamp=none --generate-entitlement-der --entitlements "$PWD/cmux.entitlements" "$TAG_APP_PATH" >/dev/null 2>&1 || true
   fi
   APP_PATH="$TAG_APP_PATH"
 fi
