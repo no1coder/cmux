@@ -96,6 +96,14 @@ final class RelayBridge {
                 self.sendRPCResponse(requestID: requestID, result: result)
             }
 
+        // V1 文本命令（read_screen 不支持 JSON-RPC，需要用 V1 协议）
+        case "read_screen":
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else { return }
+                let surfaceID = params?["surface_id"] as? String ?? ""
+                self.handleReadScreen(surfaceID: surfaceID, requestID: requestID)
+            }
+
         // 终端命令（转发到本地 Unix socket）
         default:
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -146,6 +154,35 @@ final class RelayBridge {
             // V1 协议文本响应
             sendRPCResponse(requestID: requestID, result: ["text": responseString])
         }
+    }
+
+    // MARK: - V1 命令处理
+
+    /// 通过 V1 文本协议读取终端屏幕内容
+    private func handleReadScreen(surfaceID: String, requestID: Int) {
+        guard !surfaceID.isEmpty else {
+            sendRPCResponse(requestID: requestID, result: ["error": "缺少 surface_id"])
+            return
+        }
+
+        let command = "read_screen \(surfaceID)"
+        guard let response = sendV1Command(command) else {
+            sendRPCResponse(requestID: requestID, result: ["error": "socket 通信失败"])
+            return
+        }
+
+        // read_screen 直接返回终端文本内容（可能以 "ERROR:" 开头）
+        if response.hasPrefix("ERROR") {
+            sendRPCResponse(requestID: requestID, result: ["error": response])
+            return
+        }
+
+        // 按行分割终端内容
+        let lines = response.components(separatedBy: "\n")
+        sendRPCResponse(requestID: requestID, result: [
+            "lines": lines,
+            "surface_id": surfaceID,
+        ])
     }
 
     // MARK: - 响应发送
