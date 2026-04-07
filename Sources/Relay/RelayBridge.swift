@@ -230,48 +230,82 @@ final class RelayBridge {
         relayClient?.send(data)
     }
 
-    /// 推送 surface 列表到手机端
+    /// 推送所有 workspace 的 surface 列表到手机端
     func pushSurfaceList() {
         #if DEBUG
-        dlog("[relay] pushSurfaceList 被调用, relayClient=\(relayClient != nil), status=\(relayClient?.status == .connected ? "connected" : "not connected")")
+        dlog("[relay] pushSurfaceList 被调用")
         #endif
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
 
-            // 通过 V2 JSON-RPC 获取 surface 列表
-            let request: [String: Any] = [
-                "jsonrpc": "2.0",
-                "method": "surface.list",
-                "id": 1,
-            ]
-            guard let jsonData = try? JSONSerialization.data(withJSONObject: request),
-                  let jsonString = String(data: jsonData, encoding: .utf8) else {
+            // 1. 获取所有 workspace
+            guard let wsResponse = self.sendJsonRPC(method: "workspace.list", params: nil),
+                  let wsResult = wsResponse["result"] as? [String: Any],
+                  let workspaces = wsResult["workspaces"] as? [[String: Any]] else {
                 #if DEBUG
-                dlog("[relay] pushSurfaceList: JSON 序列化失败")
+                dlog("[relay] pushSurfaceList: workspace.list 失败")
                 #endif
                 return
             }
 
-            let response = self.sendToUnixSocket(jsonString)
-            #if DEBUG
-            dlog("[relay] pushSurfaceList: socket 响应长度=\(response?.count ?? -1)")
-            #endif
+            // 记录当前选中的 workspace，后面要切回来
+            let currentWsID = workspaces.first { ($0["selected"] as? Bool) == true }?["id"] as? String
 
-            guard let response,
-                  let responseData = response.data(using: .utf8),
-                  let parsed = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
-                  let result = parsed["result"] else {
-                #if DEBUG
-                dlog("[relay] pushSurfaceList: 响应解析失败")
-                #endif
-                return
+            // 2. 遍历每个 workspace，获取其 surfaces
+            var allSurfaces: [[String: Any]] = []
+            for ws in workspaces {
+                guard let wsID = ws["id"] as? String else { continue }
+                let wsName = ws["name"] as? String ?? ""
+                let wsSelected = (ws["selected"] as? Bool) ?? false
+
+                // 切换到该 workspace（如果不是当前的）
+                if !wsSelected {
+                    _ = self.sendJsonRPC(method: "workspace.select", params: ["workspace_id": wsID])
+                }
+
+                // 获取该 workspace 的 surfaces
+                if let surfResp = self.sendJsonRPC(method: "surface.list", params: nil),
+                   let surfResult = surfResp["result"] as? [String: Any],
+                   let surfaces = surfResult["surfaces"] as? [[String: Any]] {
+                    for var surf in surfaces {
+                        // 附加 workspace 信息
+                        surf["workspace_id"] = wsID
+                        surf["workspace_name"] = wsName
+                        allSurfaces.append(surf)
+                    }
+                }
+            }
+
+            // 3. 切回原来的 workspace
+            if let currentWsID {
+                _ = self.sendJsonRPC(method: "workspace.select", params: ["workspace_id": currentWsID])
             }
 
             #if DEBUG
-            dlog("[relay] pushSurfaceList: 成功获取到 surface 数据，正在推送")
+            dlog("[relay] pushSurfaceList: 共 \(allSurfaces.count) 个 surface，跨 \(workspaces.count) 个 workspace")
             #endif
-            self.pushEvent("surface.list_update", payload: ["surfaces": result])
+
+            self.pushEvent("surface.list_update", payload: ["surfaces": allSurfaces])
         }
+    }
+
+    /// 发送 JSON-RPC 请求并返回解析后的响应
+    private func sendJsonRPC(method: String, params: [String: Any]?) -> [String: Any]? {
+        var request: [String: Any] = [
+            "jsonrpc": "2.0",
+            "method": method,
+            "id": Int(Date().timeIntervalSince1970 * 1000) % 1_000_000,
+        ]
+        if let params { request["params"] = params }
+
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: request),
+              let jsonString = String(data: jsonData, encoding: .utf8),
+              let response = sendToUnixSocket(jsonString),
+              let responseData = response.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any] else {
+            return nil
+        }
+        return parsed
     }
 
     /// 推送 workspace 列表到手机端
