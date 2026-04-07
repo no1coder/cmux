@@ -116,7 +116,16 @@ final class RelayBridge {
     // MARK: - 转发到本地 Socket
 
     /// 将 RPC 请求转发到本地 cmux Unix socket，返回结果
+    /// 如果请求包含 surface_id，会自动切换到对应 workspace
     private func forwardToSocket(method: String, params: [String: Any]?, requestID: Int) {
+        // 如果请求中有 surface_id，确保切换到正确的 workspace
+        if let surfaceID = params?["surface_id"] as? String {
+            // 先尝试直接执行，失败再切换
+            let testCmd = "read_screen \(surfaceID)"
+            if let testResp = sendV1Command(testCmd), testResp.hasPrefix("ERROR") {
+                _ = switchToWorkspaceContaining(surfaceID: surfaceID)
+            }
+        }
         // 构造 JSON-RPC 请求
         var rpcRequest: [String: Any] = [
             "jsonrpc": "2.0",
@@ -159,30 +168,66 @@ final class RelayBridge {
     // MARK: - V1 命令处理
 
     /// 通过 V1 文本协议读取终端屏幕内容
+    /// 如果目标 surface 不在当前 workspace，先自动切换
     private func handleReadScreen(surfaceID: String, requestID: Int) {
         guard !surfaceID.isEmpty else {
             sendRPCResponse(requestID: requestID, result: ["error": "缺少 surface_id"])
             return
         }
 
-        let command = "read_screen \(surfaceID)"
-        guard let response = sendV1Command(command) else {
-            sendRPCResponse(requestID: requestID, result: ["error": "socket 通信失败"])
+        // 尝试读取，如果失败（surface 不在当前 workspace），切换后重试
+        var response = sendV1Command("read_screen \(surfaceID)")
+
+        if response == nil || response?.hasPrefix("ERROR") == true {
+            // 尝试找到 surface 所在的 workspace 并切换
+            if switchToWorkspaceContaining(surfaceID: surfaceID) {
+                response = sendV1Command("read_screen \(surfaceID)")
+            }
+        }
+
+        guard let response, !response.hasPrefix("ERROR") else {
+            sendRPCResponse(requestID: requestID, result: ["error": response ?? "socket 通信失败"])
             return
         }
 
-        // read_screen 直接返回终端文本内容（可能以 "ERROR:" 开头）
-        if response.hasPrefix("ERROR") {
-            sendRPCResponse(requestID: requestID, result: ["error": response])
-            return
-        }
-
-        // 按行分割终端内容
         let lines = response.components(separatedBy: "\n")
         sendRPCResponse(requestID: requestID, result: [
             "lines": lines,
             "surface_id": surfaceID,
         ])
+    }
+
+    /// 切换到包含指定 surface 的 workspace
+    /// - Returns: 是否成功切换
+    private func switchToWorkspaceContaining(surfaceID: String) -> Bool {
+        // 获取所有 workspace
+        guard let wsResp = sendJsonRPC(method: "workspace.list", params: nil),
+              let wsResult = wsResp["result"] as? [String: Any],
+              let workspaces = wsResult["workspaces"] as? [[String: Any]] else {
+            return false
+        }
+
+        // 遍历每个 workspace 查找目标 surface
+        for ws in workspaces {
+            guard let wsID = ws["id"] as? String,
+                  (ws["selected"] as? Bool) != true else { continue }
+
+            // 切换到这个 workspace
+            _ = sendJsonRPC(method: "workspace.select", params: ["workspace_id": wsID])
+
+            // 检查这个 workspace 是否包含目标 surface
+            if let surfResp = sendJsonRPC(method: "surface.list", params: nil),
+               let surfResult = surfResp["result"] as? [String: Any],
+               let surfaces = surfResult["surfaces"] as? [[String: Any]] {
+                if surfaces.contains(where: { ($0["id"] as? String) == surfaceID }) {
+                    #if DEBUG
+                    dlog("[relay] 切换到 workspace \(wsID.prefix(8))... 以读取 surface \(surfaceID.prefix(8))...")
+                    #endif
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     // MARK: - 响应发送
