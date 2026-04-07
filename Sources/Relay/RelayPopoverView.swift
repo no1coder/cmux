@@ -589,9 +589,9 @@ final class RelayStateModel: ObservableObject {
                     }
 
                     // 启动 Relay 连接
-                    if let socketPath = RelayBootstrap.shared.bridge?.socketPath {
-                        RelayBootstrap.shared.start(socketPath: socketPath)
-                    }
+                    let socketPath = RelayBootstrap.shared.bridge?.socketPath
+                        ?? SocketControlSettings.socketPath()
+                    RelayBootstrap.shared.start(socketPath: socketPath)
                 }
             }.resume()
         }

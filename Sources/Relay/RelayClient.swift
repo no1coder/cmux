@@ -48,12 +48,15 @@ final class RelayClient: NSObject {
     /// 串行队列，用于保护 webSocketTask / reconnectDelay / status / intentionalDisconnect 等共享状态
     private let stateQueue = DispatchQueue(label: "com.cmux.relay.client.state")
 
-    /// 当前连接状态
-    private(set) var status: ConnectionStatus = .disconnected {
-        didSet {
-            if status != oldValue {
-                onStatusChange?(status)
-            }
+    /// 当前连接状态（仅通过 updateStatus 修改，确保线程安全）
+    private(set) var status: ConnectionStatus = .disconnected
+
+    /// Issue 5: 统一的状态更新入口，确保在主线程更新并触发回调
+    private func updateStatus(_ newStatus: ConnectionStatus) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.status != newStatus else { return }
+            self.status = newStatus
+            self.onStatusChange?(newStatus)
         }
     }
 
@@ -81,7 +84,7 @@ final class RelayClient: NSObject {
         stopHeartbeat()
         webSocketTask?.cancel(with: .normalClosure, reason: nil)
         webSocketTask = nil
-        status = .disconnected
+        updateStatus(.disconnected)
     }
 
     /// 发送数据到服务器
@@ -100,10 +103,11 @@ final class RelayClient: NSObject {
     private func connect() {
         guard !intentionalDisconnect else { return }
 
-        status = .connecting
+        updateStatus(.connecting)
 
-        // 构造 WebSocket URL
-        let urlString = "wss://\(serverURL)/ws/device/\(deviceID)"
+        // 构造 WebSocket URL（支持 ws:// 和 wss://）
+        let scheme = serverURL.hasPrefix("localhost") || serverURL.hasPrefix("127.0.0.1") ? "ws" : "wss"
+        let urlString = "\(scheme)://\(serverURL)/ws/device/\(deviceID)"
         guard let url = URL(string: urlString) else {
             scheduleReconnect()
             return
@@ -117,10 +121,7 @@ final class RelayClient: NSObject {
         self.webSocketTask = task
         task.resume()
 
-        // 开始读取消息循环
-        receiveNextMessage()
-
-        // 发起认证握手
+        // 先完成认证握手，成功后再启动消息循环
         performAuthHandshake()
     }
 
@@ -170,7 +171,8 @@ final class RelayClient: NSObject {
         }
 
         // 计算 HMAC-SHA256（消息格式：deviceID:nonce:timestamp，与服务端一致）
-        let timestamp = String(Int(Date().timeIntervalSince1970))
+        let timestampInt = Int(Date().timeIntervalSince1970)
+        let timestamp = String(timestampInt)
         let message_ = deviceID + ":" + nonce + ":" + timestamp
 
         guard let hmacHex = computeHMAC(message: message_) else {
@@ -183,7 +185,7 @@ final class RelayClient: NSObject {
             "type": "auth",
             "device_id": deviceID,
             "nonce": nonce,
-            "timestamp": timestamp,
+            "timestamp": timestampInt,
             "signature": hmacHex,
         ]
 
@@ -225,31 +227,34 @@ final class RelayClient: NSObject {
                     return
                 }
 
-                // 认证成功，更新状态并启动心跳
-                self.status = .connected
+                // 认证成功，更新状态并启动心跳和消息循环
+                self.updateStatus(.connected)
                 self.reconnectDelay = self.reconnectDelayBase
                 self.startHeartbeat()
+                self.receiveNextMessage()
             }
         }
     }
 
     // MARK: - HMAC 计算
 
-    /// 计算 HMAC-SHA256(SHA256(pair_secret), message)，返回十六进制字符串
+    /// 计算 HMAC-SHA256(SHA256(pair_secret) hex string, message)，返回十六进制字符串
+    /// 与 Go 服务端一致：HMAC key 是 SHA256 哈希的 hex 字符串（64 字符），不是原始字节（32 字节）
     private func computeHMAC(message: String) -> String? {
         guard let secretData = pairSecret.data(using: .utf8),
               let messageData = message.data(using: .utf8) else {
             return nil
         }
 
-        // key = SHA256(pair_secret)
+        // key = SHA256(pair_secret) 的 hex 字符串（与 Go 端 secretHash 一致）
         let keyDigest = SHA256.hash(data: secretData)
-        let keyData = Data(keyDigest)
+        let keyHex = keyDigest.map { String(format: "%02x", $0) }.joined()
+        guard let keyHexData = keyHex.data(using: .utf8) else { return nil }
 
-        // HMAC-SHA256(key, message)
-        let key = SymmetricKey(data: keyData)
+        // HMAC-SHA256(keyHex, message)
+        let key = SymmetricKey(data: keyHexData)
         let mac = HMAC<SHA256>.authenticationCode(for: messageData, using: key)
-        return Data(mac).hexString
+        return Data(mac).map { String(format: "%02x", $0) }.joined()
     }
 
     // MARK: - 消息接收循环
@@ -319,7 +324,7 @@ final class RelayClient: NSObject {
         stopHeartbeat()
         webSocketTask?.cancel(with: .abnormalClosure, reason: nil)
         webSocketTask = nil
-        status = .disconnected
+        updateStatus(.disconnected)
 
         scheduleReconnect()
     }

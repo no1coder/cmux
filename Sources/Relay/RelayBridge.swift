@@ -1,3 +1,4 @@
+import Bonsplit
 import Foundation
 
 // MARK: - RelayBridge
@@ -35,11 +36,16 @@ final class RelayBridge {
     /// Envelope 格式：{ seq, ts, from, type, payload }
     func handleIncoming(_ data: Data) {
         guard let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            #if DEBUG
+            dlog("[relay] handleIncoming: JSON 解析失败")
+            #endif
             return
         }
-
         // 解析 Envelope 字段
         let msgType = envelope["type"] as? String ?? ""
+        #if DEBUG
+        dlog("[relay] handleIncoming: type=\(msgType)")
+        #endif
         let seq = envelope["seq"] as? UInt64 ?? 0
 
         // 提取 payload（RPC 请求的实际内容）
@@ -167,6 +173,9 @@ final class RelayBridge {
 
     /// 推送 Mac 端产生的事件到手机（Envelope 格式）
     func pushEvent(_ eventType: String, payload: [String: Any]) {
+        #if DEBUG
+        dlog("[relay] pushEvent: \(eventType), relayClient=\(relayClient != nil)")
+        #endif
         var eventPayload = payload
         eventPayload["event"] = eventType
 
@@ -186,6 +195,9 @@ final class RelayBridge {
 
     /// 推送 surface 列表到手机端
     func pushSurfaceList() {
+        #if DEBUG
+        dlog("[relay] pushSurfaceList 被调用, relayClient=\(relayClient != nil), status=\(relayClient?.status == .connected ? "connected" : "not connected")")
+        #endif
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
 
@@ -196,14 +208,31 @@ final class RelayBridge {
                 "id": 1,
             ]
             guard let jsonData = try? JSONSerialization.data(withJSONObject: request),
-                  let jsonString = String(data: jsonData, encoding: .utf8),
-                  let response = self.sendToUnixSocket(jsonString),
-                  let responseData = response.data(using: .utf8),
-                  let parsed = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
-                  let result = parsed["result"] else {
+                  let jsonString = String(data: jsonData, encoding: .utf8) else {
+                #if DEBUG
+                dlog("[relay] pushSurfaceList: JSON 序列化失败")
+                #endif
                 return
             }
 
+            let response = self.sendToUnixSocket(jsonString)
+            #if DEBUG
+            dlog("[relay] pushSurfaceList: socket 响应长度=\(response?.count ?? -1)")
+            #endif
+
+            guard let response,
+                  let responseData = response.data(using: .utf8),
+                  let parsed = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+                  let result = parsed["result"] else {
+                #if DEBUG
+                dlog("[relay] pushSurfaceList: 响应解析失败")
+                #endif
+                return
+            }
+
+            #if DEBUG
+            dlog("[relay] pushSurfaceList: 成功获取到 surface 数据，正在推送")
+            #endif
             self.pushEvent("surface.list_update", payload: ["surfaces": result])
         }
     }

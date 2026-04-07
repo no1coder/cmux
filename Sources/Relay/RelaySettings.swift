@@ -49,6 +49,12 @@ struct RelaySettings {
         set { writeFile("paired-phone-id", content: newValue) }
     }
 
+    /// 已配对手机的名称
+    static var pairedPhoneName: String? {
+        get { readFile("paired-phone-name") }
+        set { writeFile("paired-phone-name", content: newValue) }
+    }
+
     // MARK: - Keychain（pair_secret）
 
     private static let keychainService = "com.cmux.relay.pair-secret"
