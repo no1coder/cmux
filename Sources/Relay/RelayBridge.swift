@@ -33,6 +33,13 @@ final class RelayBridge {
     /// 监听相关操作的串行队列
     private let watcherQueue = DispatchQueue(label: "com.cmux.relay.jsonlWatcher")
 
+    // MARK: - 持久化 Socket 连接
+
+    /// 复用的 Unix socket 文件描述符，避免每次 RPC 都重新建连
+    private var persistentFd: Int32?
+    /// 保护 persistentFd 的串行队列
+    private let socketQueue = DispatchQueue(label: "com.cmux.relay.socket")
+
     // MARK: - 安全：RPC 方法白名单
 
     /// 允许手机端通过 relay 转发到本地 socket 的方法白名单
@@ -530,16 +537,32 @@ final class RelayBridge {
     }
 
     /// 发送 JSON 字符串到本地 Unix socket，返回响应字符串
+    /// 内部复用持久化连接，发送失败时自动重连一次
     func sendToUnixSocket(_ json: String) -> String? {
+        return socketQueue.sync {
+            // 尝试用持久化连接发送
+            if let fd = persistentFd, let result = sendAndRecv(fd: fd, json: json) {
+                return result
+            }
+            // 持久化连接不可用或发送失败，重连
+            closePersistentFd()
+            guard let fd = createConnection() else { return nil }
+            persistentFd = fd
+            return sendAndRecv(fd: fd, json: json)
+        }
+    }
+
+    /// 创建新的 Unix socket 连接
+    private func createConnection() -> Int32? {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
-        defer { close(fd) }
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
 
         let pathBytes = socketPath.utf8CString
         guard pathBytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else {
+            close(fd)
             return nil
         }
         withUnsafeMutableBytes(of: &addr.sun_path) { ptr in
@@ -553,15 +576,27 @@ final class RelayBridge {
                 connect(fd, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
-        guard connectResult == 0 else { return nil }
+        guard connectResult == 0 else {
+            close(fd)
+            return nil
+        }
 
+        return fd
+    }
+
+    /// 在已连接的 fd 上发送 JSON 并读取响应
+    private func sendAndRecv(fd: Int32, json: String) -> String? {
         let payload = json + "\n"
         guard let payloadData = payload.data(using: .utf8) else { return nil }
 
         let sendResult = payloadData.withUnsafeBytes { ptr in
             Foundation.send(fd, ptr.baseAddress!, ptr.count, 0)
         }
-        guard sendResult == payloadData.count else { return nil }
+        guard sendResult == payloadData.count else {
+            // 发送失败，标记连接已断开
+            closePersistentFd()
+            return nil
+        }
 
         // 读取响应（增大缓冲区到 64KB）
         var responseBuffer = Data()
@@ -569,13 +604,33 @@ final class RelayBridge {
 
         while true {
             let bytesRead = recv(fd, &readBuf, readBuf.count, 0)
-            if bytesRead <= 0 { break }
+            if bytesRead <= 0 {
+                // 连接已断开，清理持久化 fd
+                closePersistentFd()
+                if responseBuffer.isEmpty { return nil }
+                break
+            }
             responseBuffer.append(contentsOf: readBuf[..<bytesRead])
             if responseBuffer.contains(UInt8(ascii: "\n")) { break }
         }
 
         return String(data: responseBuffer, encoding: .utf8)?
             .trimmingCharacters(in: .newlines)
+    }
+
+    /// 关闭持久化连接并清理 fd
+    private func closePersistentFd() {
+        if let fd = persistentFd {
+            close(fd)
+            persistentFd = nil
+        }
+    }
+
+    /// 主动关闭持久化 socket 连接（供外部调用，如断开 relay 时）
+    func closeSocket() {
+        socketQueue.sync {
+            closePersistentFd()
+        }
     }
 
     // MARK: - Claude JSONL 消息读取
