@@ -24,6 +24,15 @@ final class RelayBridge {
     /// 浏览器操作处理器（处理 browser.screenshot 消息）
     var browserHandler: RelayBrowserHandler?
 
+    // MARK: - JSONL 文件监听（轮询→推送）
+
+    /// 当前监听的 JSONL 文件路径 → (fileDescriptor, dispatchSource, lastFileSize)
+    private var jsonlWatchers: [String: (fd: Int32, source: DispatchSourceFileSystemObject, lastSize: UInt64)] = [:]
+    /// surfaceID → 正在监听的 JSONL 路径
+    private var watchedSurfaces: [String: String] = [:]
+    /// 监听相关操作的串行队列
+    private let watcherQueue = DispatchQueue(label: "com.cmux.relay.jsonlWatcher")
+
     // MARK: - 安全：RPC 方法白名单
 
     /// 允许手机端通过 relay 转发到本地 socket 的方法白名单
@@ -161,6 +170,21 @@ final class RelayBridge {
                 }
                 self.handleReadScreen(surfaceID: surfaceID, requestID: requestID)
             }
+
+        // Claude 会话监听：手机进入聊天时开始，离开时停止
+        case "claude.watch":
+            let surfaceID = params?["surface_id"] as? String ?? ""
+            guard Self.isValidID(surfaceID) else {
+                sendRPCResponse(requestID: requestID, result: ["error": "invalid surface_id"])
+                return
+            }
+            startWatchingClaude(surfaceID: surfaceID)
+            sendRPCResponse(requestID: requestID, result: ["ok": true])
+
+        case "claude.unwatch":
+            let surfaceID = params?["surface_id"] as? String ?? ""
+            stopWatchingClaude(surfaceID: surfaceID)
+            sendRPCResponse(requestID: requestID, result: ["ok": true])
 
         // Claude JSONL 消息读取（直接从 Claude Code 会话文件读取，不解析终端）
         case "claude.messages":
@@ -822,5 +846,205 @@ final class RelayBridge {
 
         // 都没有对话的话，返回最新的（可能是刚启动的空会话）
         return jsonlFiles.first?.path
+    }
+
+    // MARK: - JSONL 文件监听（服务端推送）
+
+    /// 开始监听指定 surface 的 Claude JSONL 文件变化
+    /// 当文件有新内容写入时，自动读取增量并推送给手机
+    func startWatchingClaude(surfaceID: String) {
+        watcherQueue.async { [weak self] in
+            guard let self else { return }
+
+            // 如果已在监听，先停止
+            self.stopWatchingClaudeSync(surfaceID: surfaceID)
+
+            // 定位 JSONL 文件
+            let jsonlPath: String
+            if let sessionId = self.lookupSessionId(forSurface: surfaceID),
+               Self.isValidID(sessionId) {
+                let cwd = self.getSurfaceCwd(surfaceID: surfaceID) ?? ""
+                let projectDir = self.claudeProjectPath(forCwd: cwd)
+                let path = "\(projectDir)/\(sessionId).jsonl"
+                guard FileManager.default.fileExists(atPath: path) else { return }
+                jsonlPath = path
+            } else if let fallback = self.findLatestJsonlByCwd(surfaceID: surfaceID) {
+                jsonlPath = fallback
+            } else {
+                return
+            }
+
+            // 打开文件描述符
+            let fd = Darwin.open(jsonlPath, O_RDONLY | O_EVTONLY)
+            guard fd >= 0 else { return }
+
+            // 记录当前文件大小
+            let attrs = try? FileManager.default.attributesOfItem(atPath: jsonlPath)
+            let currentSize = (attrs?[.size] as? UInt64) ?? 0
+
+            // 创建 DispatchSource 监听文件写入
+            let source = DispatchSource.makeFileSystemObjectSource(
+                fileDescriptor: fd,
+                eventMask: [.write, .extend],
+                queue: self.watcherQueue
+            )
+
+            source.setEventHandler { [weak self] in
+                self?.handleJsonlChange(surfaceID: surfaceID, path: jsonlPath)
+            }
+
+            source.setCancelHandler {
+                Darwin.close(fd)
+            }
+
+            self.jsonlWatchers[jsonlPath] = (fd, source, currentSize)
+            self.watchedSurfaces[surfaceID] = jsonlPath
+
+            source.resume()
+
+            #if DEBUG
+            dlog("[relay] 开始监听 JSONL: \(jsonlPath.components(separatedBy: "/").last ?? "?") for surface \(surfaceID.prefix(8))")
+            #endif
+        }
+    }
+
+    /// 停止监听指定 surface
+    func stopWatchingClaude(surfaceID: String) {
+        watcherQueue.async { [weak self] in
+            self?.stopWatchingClaudeSync(surfaceID: surfaceID)
+        }
+    }
+
+    private func stopWatchingClaudeSync(surfaceID: String) {
+        guard let path = watchedSurfaces.removeValue(forKey: surfaceID),
+              let watcher = jsonlWatchers.removeValue(forKey: path) else { return }
+        watcher.source.cancel()
+        #if DEBUG
+        dlog("[relay] 停止监听 JSONL: surface \(surfaceID.prefix(8))")
+        #endif
+    }
+
+    /// 停止所有监听
+    func stopAllWatchers() {
+        watcherQueue.async { [weak self] in
+            guard let self else { return }
+            for (_, watcher) in self.jsonlWatchers {
+                watcher.source.cancel()
+            }
+            self.jsonlWatchers.removeAll()
+            self.watchedSurfaces.removeAll()
+        }
+    }
+
+    /// 文件变化时读取增量内容并推送
+    private func handleJsonlChange(surfaceID: String, path: String) {
+        guard var watcher = jsonlWatchers[path] else { return }
+
+        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+        let newSize = (attrs?[.size] as? UInt64) ?? 0
+
+        // 文件没有变大，跳过
+        guard newSize > watcher.lastSize else { return }
+
+        // 读取新增内容
+        guard let fh = FileHandle(forReadingAtPath: path) else { return }
+        defer { fh.closeFile() }
+
+        fh.seek(toFileOffset: watcher.lastSize)
+        let newData = fh.readDataToEndOfFile()
+        watcher.lastSize = newSize
+        jsonlWatchers[path] = watcher
+
+        guard let newContent = String(data: newData, encoding: .utf8) else { return }
+
+        // 解析新增的 JSON 行
+        var newMessages: [[String: Any]] = []
+        for line in newContent.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty,
+                  let lineData = trimmed.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else { continue }
+
+            let msgType = json["type"] as? String ?? ""
+            guard msgType == "user" || msgType == "assistant" else { continue }
+
+            // 复用 readClaudeMessages 的消息解析逻辑
+            var msgResult: [String: Any] = [
+                "type": msgType,
+                "uuid": json["uuid"] as? String ?? "",
+                "timestamp": json["timestamp"] as? String ?? "",
+            ]
+
+            if let message = json["message"] as? [String: Any] {
+                if let stopReason = message["stop_reason"] as? String {
+                    msgResult["stop_reason"] = stopReason
+                }
+                if let content = message["content"] {
+                    if let textContent = content as? String {
+                        msgResult["content"] = [["type": "text", "text": textContent]]
+                    } else if let blocks = content as? [[String: Any]] {
+                        var cleanBlocks: [[String: Any]] = []
+                        for block in blocks {
+                            let blockType = block["type"] as? String ?? ""
+                            switch blockType {
+                            case "text":
+                                cleanBlocks.append(["type": "text", "text": block["text"] as? String ?? ""])
+                            case "tool_use":
+                                cleanBlocks.append([
+                                    "type": "tool_use", "name": block["name"] as? String ?? "",
+                                    "id": block["id"] as? String ?? "", "input": block["input"] ?? [:],
+                                ])
+                            case "tool_result":
+                                let resultContent = block["content"]
+                                let resultText: String
+                                if let str = resultContent as? String { resultText = str }
+                                else if let arr = resultContent as? [[String: Any]] {
+                                    resultText = arr.compactMap { $0["text"] as? String }.joined(separator: "\n")
+                                } else { resultText = "" }
+                                cleanBlocks.append([
+                                    "type": "tool_result",
+                                    "tool_use_id": block["tool_use_id"] as? String ?? "",
+                                    "content": String(resultText.prefix(500)),
+                                    "is_error": block["is_error"] as? Bool ?? false,
+                                ])
+                            default: continue
+                            }
+                        }
+                        msgResult["content"] = cleanBlocks
+                    }
+                }
+                if let model = message["model"] as? String {
+                    msgResult["model"] = model
+                }
+            }
+
+            newMessages.append(msgResult)
+        }
+
+        guard !newMessages.isEmpty else { return }
+
+        // 推断状态
+        var status = "idle"
+        if let lastMsg = newMessages.last {
+            let lastType = lastMsg["type"] as? String ?? ""
+            let lastStop = lastMsg["stop_reason"] as? String
+            if lastType == "assistant" && lastStop == nil { status = "thinking" }
+            else if lastType == "assistant" && lastStop == "tool_use" { status = "tool_running" }
+            else if lastType == "user" {
+                let blocks = lastMsg["content"] as? [[String: Any]] ?? []
+                if blocks.contains(where: { ($0["type"] as? String) == "tool_result" }) { status = "thinking" }
+            }
+        }
+
+        // 推送增量消息到手机
+        pushEvent("claude.messages.update", payload: [
+            "surface_id": surfaceID,
+            "messages": newMessages,
+            "status": status,
+        ])
+
+        #if DEBUG
+        dlog("[relay] JSONL 推送: surface=\(surfaceID.prefix(8)) new=\(newMessages.count) status=\(status)")
+        #endif
     }
 }
