@@ -719,11 +719,13 @@ final class RelayBridge {
         return findLatestJsonl(in: projectDir)
     }
 
-    /// 找到目录中最新修改的 .jsonl 文件
+    /// 找到目录中当前活跃的 .jsonl 会话文件
+    /// 优先选最近 5 分钟内修改过的文件中，包含 user 消息的那个
     private func findLatestJsonl(in directory: String) -> String? {
         let fm = FileManager.default
         guard let contents = try? fm.contentsOfDirectory(atPath: directory) else { return nil }
 
+        let now = Date()
         let jsonlFiles = contents
             .filter { $0.hasSuffix(".jsonl") }
             .compactMap { filename -> (path: String, date: Date)? in
@@ -734,6 +736,19 @@ final class RelayBridge {
             }
             .sorted { $0.date > $1.date }
 
+        // 优先选最近 5 分钟内修改的、包含 user/assistant 消息的文件
+        let recentThreshold = now.addingTimeInterval(-300)
+        for file in jsonlFiles where file.date > recentThreshold {
+            if let data = fm.contents(atPath: file.path),
+               let content = String(data: data, encoding: .utf8) {
+                // 检查是否有对话消息（不只是 permission-mode）
+                if content.contains("\"type\":\"user\"") || content.contains("\"type\":\"assistant\"") {
+                    return file.path
+                }
+            }
+        }
+
+        // 都没有对话的话，返回最新的（可能是刚启动的空会话）
         return jsonlFiles.first?.path
     }
 }
