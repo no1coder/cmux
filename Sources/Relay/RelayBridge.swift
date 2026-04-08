@@ -24,6 +24,28 @@ final class RelayBridge {
     /// 浏览器操作处理器（处理 browser.screenshot 消息）
     var browserHandler: RelayBrowserHandler?
 
+    // MARK: - 安全：RPC 方法白名单
+
+    /// 允许手机端通过 relay 转发到本地 socket 的方法白名单
+    /// 不在此列表中的方法将被拒绝，防止任意命令执行
+    private static let allowedForwardMethods: Set<String> = [
+        // 终端输入
+        "surface.send_text", "surface.send_key",
+        // Surface 操作
+        "surface.focus", "surface.current",
+        // Workspace 导航
+        "workspace.select", "workspace.next", "workspace.previous",
+        "workspace.last", "workspace.current",
+        // Pane 操作
+        "pane.focus", "pane.last",
+    ]
+
+    /// surfaceID/sessionId 格式验证：仅允许 UUID 字符 + 连字符
+    private static func isValidID(_ id: String) -> Bool {
+        guard !id.isEmpty, id.count <= 128 else { return false }
+        return id.allSatisfy { $0.isHexDigit || $0 == "-" || $0.isLetter }
+    }
+
     // MARK: - 初始化
 
     init(socketPath: String) {
@@ -132,6 +154,11 @@ final class RelayBridge {
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self else { return }
                 let surfaceID = params?["surface_id"] as? String ?? ""
+                // 安全：验证 surfaceID 格式，防止 V1 命令注入
+                guard Self.isValidID(surfaceID) else {
+                    self.sendRPCResponse(requestID: requestID, result: ["error": "invalid surface_id format"])
+                    return
+                }
                 self.handleReadScreen(surfaceID: surfaceID, requestID: requestID)
             }
 
@@ -140,13 +167,21 @@ final class RelayBridge {
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self else { return }
                 let surfaceID = params?["surface_id"] as? String ?? ""
+                guard Self.isValidID(surfaceID) else {
+                    self.sendRPCResponse(requestID: requestID, result: ["error": "invalid surface_id format"])
+                    return
+                }
                 let afterSeq = params?["after_seq"] as? Int ?? 0
                 let result = self.readClaudeMessages(surfaceID: surfaceID, afterSeq: afterSeq)
                 self.sendRPCResponse(requestID: requestID, result: result)
             }
 
-        // 其他终端命令（转发到本地 Unix socket，V2 API 内部通过 surface_id 定位 workspace）
+        // 白名单内的方法：转发到本地 socket
         default:
+            guard Self.allowedForwardMethods.contains(method) else {
+                sendRPCResponse(requestID: requestID, result: ["error": "method_not_allowed: \(method)"])
+                return
+            }
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self else { return }
                 self.forwardToSocket(method: method, params: params, requestID: requestID)
@@ -523,32 +558,42 @@ final class RelayBridge {
 
     /// 从 Claude Code 的 JSONL 会话文件读取结构化消息
     /// 跟 happy 项目的 sessionScanner 一样，直接读文件而非解析终端
+    /// Claude 项目数据的安全基础路径
+    private static var claudeProjectsBase: String {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects").path
+    }
+
     private func readClaudeMessages(surfaceID: String, afterSeq: Int) -> [String: Any] {
         // 1. 先从 session store 精确匹配 surfaceId → sessionId
         let jsonlPath: String
         if let sessionId = lookupSessionId(forSurface: surfaceID) {
-            // 精确匹配：从 session store 获取 session ID
+            // 安全：验证 sessionId 格式（UUID 字符）
+            guard Self.isValidID(sessionId) else {
+                return ["error": "invalid session_id format", "messages": []]
+            }
             let cwd = getSurfaceCwd(surfaceID: surfaceID) ?? ""
             let projectDir = claudeProjectPath(forCwd: cwd)
             let path = "\(projectDir)/\(sessionId).jsonl"
             if FileManager.default.fileExists(atPath: path) {
                 jsonlPath = path
             } else {
-                // session store 有映射但 JSONL 不存在 — 新会话还没写入，返回空
-                // 不要回退到旧文件，那属于不同的会话
                 return ["messages": [] as [Any], "session_file": "\(sessionId).jsonl", "total_seq": 0]
             }
         } else {
-            // 没有 session store 记录，回退到按 CWD + 最新修改时间
             guard let fallback = findLatestJsonlByCwd(surfaceID: surfaceID) else {
-                return ["error": "无法定位会话文件（缺少 session store 和 CWD）", "messages": []]
+                return ["error": "无法定位会话文件", "messages": []]
             }
             jsonlPath = fallback
         }
 
+        // 安全：验证最终路径必须在 ~/.claude/projects/ 下
+        let resolvedPath = (jsonlPath as NSString).resolvingSymlinksInPath
+        guard resolvedPath.hasPrefix(Self.claudeProjectsBase) else {
+            return ["error": "path_outside_allowed_scope", "messages": []]
+        }
+
         let fm = FileManager.default
 
-        // 4. 读取并解析 JSONL
         guard let data = fm.contents(atPath: jsonlPath),
               let content = String(data: data, encoding: .utf8) else {
             return ["error": "无法读取会话文件", "messages": []]
