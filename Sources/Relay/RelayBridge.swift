@@ -346,7 +346,11 @@ final class RelayBridge {
 
         for ws in workspaces {
             guard let wsID = ws["id"] as? String else { continue }
-            let wsName = ws["name"] as? String ?? ""
+            // workspace 返回 title 和 current_directory 字段
+            let wsTitle = ws["title"] as? String ?? ""
+            let wsCwd = ws["current_directory"] as? String ?? ""
+            // 优先使用 current_directory（目录路径），其次 title
+            let wsName = wsCwd.isEmpty ? wsTitle : wsCwd
             let wsSelected = (ws["selected"] as? Bool) ?? false
 
             if !wsSelected {
