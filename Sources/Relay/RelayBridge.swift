@@ -590,12 +590,15 @@ final class RelayBridge {
             ]
 
             if let message = json["message"] as? [String: Any] {
+                // stop_reason：null=生成中, end_turn=完成, tool_use=等待工具
+                if let stopReason = message["stop_reason"] as? String {
+                    msgResult["stop_reason"] = stopReason
+                }
+
                 if let content = message["content"] {
                     if let textContent = content as? String {
-                        // user 消息的 content 可能是纯文本
                         msgResult["content"] = [["type": "text", "text": textContent]]
                     } else if let blocks = content as? [[String: Any]] {
-                        // assistant 消息的 content 是 block 数组
                         var cleanBlocks: [[String: Any]] = []
                         for block in blocks {
                             let blockType = block["type"] as? String ?? ""
@@ -606,7 +609,6 @@ final class RelayBridge {
                                     "text": block["text"] as? String ?? "",
                                 ])
                             case "thinking":
-                                // 跳过 thinking 内容（不显示给用户）
                                 continue
                             case "tool_use":
                                 cleanBlocks.append([
@@ -616,10 +618,20 @@ final class RelayBridge {
                                     "input": block["input"] ?? [:],
                                 ])
                             case "tool_result":
+                                let resultContent = block["content"]
+                                let resultText: String
+                                if let str = resultContent as? String {
+                                    resultText = str
+                                } else if let arr = resultContent as? [[String: Any]] {
+                                    resultText = arr.compactMap { $0["text"] as? String }.joined(separator: "\n")
+                                } else {
+                                    resultText = ""
+                                }
                                 cleanBlocks.append([
                                     "type": "tool_result",
                                     "tool_use_id": block["tool_use_id"] as? String ?? "",
-                                    "content": block["content"] as? String ?? "",
+                                    "content": String(resultText.prefix(500)),
+                                    "is_error": block["is_error"] as? Bool ?? false,
                                 ])
                             default:
                                 continue
@@ -629,7 +641,6 @@ final class RelayBridge {
                     }
                 }
 
-                // 附加模型和用量信息
                 if let model = message["model"] as? String {
                     msgResult["model"] = model
                 }
@@ -638,14 +649,32 @@ final class RelayBridge {
             messages.append(msgResult)
         }
 
+        // 推断整体状态：基于最后一条消息
+        var status = "idle"
+        if let lastMsg = messages.last {
+            let lastType = lastMsg["type"] as? String ?? ""
+            let lastStop = lastMsg["stop_reason"] as? String
+            if lastType == "assistant" && lastStop == nil {
+                status = "thinking"
+            } else if lastType == "assistant" && lastStop == "tool_use" {
+                status = "tool_running"
+            } else if lastType == "user" {
+                let blocks = lastMsg["content"] as? [[String: Any]] ?? []
+                if blocks.contains(where: { ($0["type"] as? String) == "tool_result" }) {
+                    status = "thinking" // 工具结果返回后 Claude 会继续思考
+                }
+            }
+        }
+
         #if DEBUG
-        dlog("[relay] claude.messages: surfaceID=\(surfaceID.prefix(8)) jsonl=\(jsonlPath.components(separatedBy: "/").last ?? "?") total=\(messages.count) afterSeq=\(afterSeq)")
+        dlog("[relay] claude.messages: surfaceID=\(surfaceID.prefix(8)) jsonl=\(jsonlPath.components(separatedBy: "/").last ?? "?") total=\(messages.count) afterSeq=\(afterSeq) status=\(status)")
         #endif
 
         return [
             "messages": messages,
             "session_file": jsonlPath.components(separatedBy: "/").last ?? "",
             "total_seq": seq,
+            "status": status,
         ]
     }
 
