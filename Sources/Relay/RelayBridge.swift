@@ -524,23 +524,31 @@ final class RelayBridge {
     /// 从 Claude Code 的 JSONL 会话文件读取结构化消息
     /// 跟 happy 项目的 sessionScanner 一样，直接读文件而非解析终端
     private func readClaudeMessages(surfaceID: String, afterSeq: Int) -> [String: Any] {
-        // 1. 获取 surface 的工作目录
-        guard let cwd = getSurfaceCwd(surfaceID: surfaceID) else {
-            return ["error": "无法获取工作目录", "messages": []]
+        // 1. 先从 session store 精确匹配 surfaceId → sessionId
+        let jsonlPath: String
+        if let sessionId = lookupSessionId(forSurface: surfaceID) {
+            // 精确匹配：从 session store 获取 session ID
+            let cwd = getSurfaceCwd(surfaceID: surfaceID) ?? ""
+            let projectDir = claudeProjectPath(forCwd: cwd)
+            let path = "\(projectDir)/\(sessionId).jsonl"
+            if FileManager.default.fileExists(atPath: path) {
+                jsonlPath = path
+            } else {
+                // session store 中的 session ID 对应的文件不存在，回退到最新文件
+                guard let fallback = findLatestJsonlByCwd(surfaceID: surfaceID) else {
+                    return ["error": "未找到会话文件", "messages": []]
+                }
+                jsonlPath = fallback
+            }
+        } else {
+            // 没有 session store 记录，回退到按 CWD + 最新修改时间
+            guard let fallback = findLatestJsonlByCwd(surfaceID: surfaceID) else {
+                return ["error": "无法定位会话文件（缺少 session store 和 CWD）", "messages": []]
+            }
+            jsonlPath = fallback
         }
 
-        // 2. 构造 Claude 项目路径
-        let claudeProjectDir = claudeProjectPath(forCwd: cwd)
         let fm = FileManager.default
-
-        guard fm.fileExists(atPath: claudeProjectDir) else {
-            return ["error": "Claude 项目目录不存在: \(claudeProjectDir)", "messages": []]
-        }
-
-        // 3. 找到最新的 .jsonl 文件（最近修改的会话）
-        guard let jsonlPath = findLatestJsonl(in: claudeProjectDir) else {
-            return ["error": "未找到会话文件", "messages": []]
-        }
 
         // 4. 读取并解析 JSONL
         guard let data = fm.contents(atPath: jsonlPath),
@@ -633,7 +641,7 @@ final class RelayBridge {
         }
 
         #if DEBUG
-        dlog("[relay] claude.messages: surfaceID=\(surfaceID.prefix(8)) cwd=\(cwd) jsonl=\(jsonlPath.components(separatedBy: "/").last ?? "?") total=\(messages.count) afterSeq=\(afterSeq)")
+        dlog("[relay] claude.messages: surfaceID=\(surfaceID.prefix(8)) jsonl=\(jsonlPath.components(separatedBy: "/").last ?? "?") total=\(messages.count) afterSeq=\(afterSeq)")
         #endif
 
         return [
@@ -683,6 +691,32 @@ final class RelayBridge {
         let projectHash = expandedCwd.replacingOccurrences(of: "/", with: "-")
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         return "\(home)/.claude/projects/\(projectHash)"
+    }
+
+    /// 从 session store 查找 surface 对应的 Claude session ID
+    private func lookupSessionId(forSurface surfaceID: String) -> String? {
+        let storePath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cmuxterm/claude-hook-sessions.json").path
+        guard let data = FileManager.default.contents(atPath: storePath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let sessions = json["sessions"] as? [String: [String: Any]] else {
+            return nil
+        }
+        // 遍历 sessions，找到 surfaceId 匹配的记录
+        for (sessionId, record) in sessions {
+            if let sid = record["surfaceId"] as? String, sid == surfaceID {
+                return sessionId
+            }
+        }
+        return nil
+    }
+
+    /// 通过 CWD 定位最新的 JSONL 文件（回退方案）
+    private func findLatestJsonlByCwd(surfaceID: String) -> String? {
+        guard let cwd = getSurfaceCwd(surfaceID: surfaceID) else { return nil }
+        let projectDir = claudeProjectPath(forCwd: cwd)
+        guard FileManager.default.fileExists(atPath: projectDir) else { return nil }
+        return findLatestJsonl(in: projectDir)
     }
 
     /// 找到目录中最新修改的 .jsonl 文件
