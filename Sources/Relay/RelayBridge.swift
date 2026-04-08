@@ -715,6 +715,12 @@ final class RelayBridge {
         var messages: [[String: Any]] = []
         var seq = 0
 
+        // 累计 token 使用量（遍历所有 assistant 消息）
+        var totalInputTokens = 0
+        var totalOutputTokens = 0
+        var totalCacheCreationTokens = 0
+        var totalCacheReadTokens = 0
+
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
@@ -801,6 +807,14 @@ final class RelayBridge {
                 if let model = message["model"] as? String {
                     msgResult["model"] = model
                 }
+
+                // 累计 token 使用量
+                if msgType == "assistant", let usage = message["usage"] as? [String: Any] {
+                    totalInputTokens += usage["input_tokens"] as? Int ?? 0
+                    totalOutputTokens += usage["output_tokens"] as? Int ?? 0
+                    totalCacheCreationTokens += usage["cache_creation_input_tokens"] as? Int ?? 0
+                    totalCacheReadTokens += usage["cache_read_input_tokens"] as? Int ?? 0
+                }
             }
 
             messages.append(msgResult)
@@ -827,11 +841,21 @@ final class RelayBridge {
         dlog("[relay] claude.messages: surfaceID=\(surfaceID.prefix(8)) jsonl=\(jsonlPath.components(separatedBy: "/").last ?? "?") total=\(messages.count) afterSeq=\(afterSeq) status=\(status)")
         #endif
 
+        let totalTokens = totalInputTokens + totalOutputTokens + totalCacheCreationTokens + totalCacheReadTokens
+        let usage: [String: Any] = [
+            "input_tokens": totalInputTokens,
+            "output_tokens": totalOutputTokens,
+            "cache_creation_tokens": totalCacheCreationTokens,
+            "cache_read_tokens": totalCacheReadTokens,
+            "total_tokens": totalTokens,
+        ]
+
         return [
             "messages": messages,
             "session_file": jsonlPath.components(separatedBy: "/").last ?? "",
             "total_seq": seq,
             "status": status,
+            "usage": usage,
         ]
     }
 
@@ -1047,6 +1071,11 @@ final class RelayBridge {
 
         // 解析新增的 JSON 行
         var newMessages: [[String: Any]] = []
+        // 增量 token 使用量（本次新增消息的 usage）
+        var deltaInputTokens = 0
+        var deltaOutputTokens = 0
+        var deltaCacheCreationTokens = 0
+        var deltaCacheReadTokens = 0
         for line in newContent.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty,
@@ -1104,6 +1133,14 @@ final class RelayBridge {
                 if let model = message["model"] as? String {
                     msgResult["model"] = model
                 }
+
+                // 累计增量 token 使用量
+                if msgType == "assistant", let usage = message["usage"] as? [String: Any] {
+                    deltaInputTokens += usage["input_tokens"] as? Int ?? 0
+                    deltaOutputTokens += usage["output_tokens"] as? Int ?? 0
+                    deltaCacheCreationTokens += usage["cache_creation_input_tokens"] as? Int ?? 0
+                    deltaCacheReadTokens += usage["cache_read_input_tokens"] as? Int ?? 0
+                }
             }
 
             newMessages.append(msgResult)
@@ -1124,11 +1161,20 @@ final class RelayBridge {
             }
         }
 
-        // 推送增量消息到手机
+        // 推送增量消息到手机（含增量 token 使用量）
+        let deltaTotal = deltaInputTokens + deltaOutputTokens + deltaCacheCreationTokens + deltaCacheReadTokens
+        let deltaUsage: [String: Any] = [
+            "input_tokens": deltaInputTokens,
+            "output_tokens": deltaOutputTokens,
+            "cache_creation_tokens": deltaCacheCreationTokens,
+            "cache_read_tokens": deltaCacheReadTokens,
+            "total_tokens": deltaTotal,
+        ]
         pushEvent("claude.messages.update", payload: [
             "surface_id": surfaceID,
             "messages": newMessages,
             "status": status,
+            "usage": deltaUsage,
         ])
 
         #if DEBUG
