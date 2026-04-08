@@ -534,11 +534,9 @@ final class RelayBridge {
             if FileManager.default.fileExists(atPath: path) {
                 jsonlPath = path
             } else {
-                // session store 中的 session ID 对应的文件不存在，回退到最新文件
-                guard let fallback = findLatestJsonlByCwd(surfaceID: surfaceID) else {
-                    return ["error": "未找到会话文件", "messages": []]
-                }
-                jsonlPath = fallback
+                // session store 有映射但 JSONL 不存在 — 新会话还没写入，返回空
+                // 不要回退到旧文件，那属于不同的会话
+                return ["messages": [] as [Any], "session_file": "\(sessionId).jsonl", "total_seq": 0]
             }
         } else {
             // 没有 session store 记录，回退到按 CWD + 最新修改时间
