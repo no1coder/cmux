@@ -69,6 +69,7 @@ final class RelayBootstrap {
         relayBridge.agentApproval = relayAgentApproval
         relayBridge.fileHandler = fileHandler
         relayBridge.browserHandler = browserHandler
+        relayBridge.e2eCrypto = RelayE2ECrypto(pairSecret: pairSecret)
         relayScreenStream.bridge = relayBridge
 
         // RelayClient 收到消息时，交给 Bridge 处理

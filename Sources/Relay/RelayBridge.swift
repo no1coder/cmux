@@ -24,6 +24,9 @@ final class RelayBridge {
     /// 浏览器操作处理器（处理 browser.screenshot 消息）
     var browserHandler: RelayBrowserHandler?
 
+    /// E2E 加密管理器（可选：nil 时不加密，兼容旧版本）
+    var e2eCrypto: RelayE2ECrypto?
+
     // MARK: - JSONL 文件监听（轮询→推送）
 
     /// 当前监听的 JSONL 文件路径 → (fileDescriptor, dispatchSource, lastFileSize)
@@ -87,9 +90,23 @@ final class RelayBridge {
         let seq = envelope["seq"] as? UInt64 ?? 0
 
         // 提取 payload（RPC 请求的实际内容）
-        guard let payload = envelope["payload"] as? [String: Any] else {
+        guard let rawPayload = envelope["payload"] as? [String: Any] else {
             // 非 RPC 消息（如 resume），忽略
             return
+        }
+
+        // E2E 解密：如果 payload 是加密格式，则解密还原
+        let payload: [String: Any]
+        if RelayE2ECrypto.isEncrypted(rawPayload), let crypto = e2eCrypto {
+            guard let decrypted = crypto.decrypt(rawPayload) else {
+                #if DEBUG
+                dlog("[relay] handleIncoming: E2E 解密失败")
+                #endif
+                return
+            }
+            payload = decrypted
+        } else {
+            payload = rawPayload
         }
 
         let method = payload["method"] as? String ?? ""
@@ -337,12 +354,20 @@ final class RelayBridge {
         var responsePayload = result
         responsePayload["id"] = requestID
 
+        // E2E 加密：如果配置了加密管理器，则加密 payload
+        let finalPayload: [String: Any]
+        if let crypto = e2eCrypto, let encrypted = crypto.encrypt(responsePayload) {
+            finalPayload = encrypted
+        } else {
+            finalPayload = responsePayload
+        }
+
         let envelope: [String: Any] = [
             "seq": 0,
             "ts": Int64(Date().timeIntervalSince1970),
             "from": "mac",
             "type": "rpc_response",
-            "payload": responsePayload,
+            "payload": finalPayload,
         ]
 
         guard let data = try? JSONSerialization.data(withJSONObject: envelope) else {
@@ -361,12 +386,20 @@ final class RelayBridge {
         var eventPayload = payload
         eventPayload["event"] = eventType
 
+        // E2E 加密：如果配置了加密管理器，则加密 payload
+        let finalPayload: [String: Any]
+        if let crypto = e2eCrypto, let encrypted = crypto.encrypt(eventPayload) {
+            finalPayload = encrypted
+        } else {
+            finalPayload = eventPayload
+        }
+
         let envelope: [String: Any] = [
             "seq": 0,
             "ts": Int64(Date().timeIntervalSince1970),
             "from": "mac",
             "type": "event",
-            "payload": eventPayload,
+            "payload": finalPayload,
         ]
 
         guard let data = try? JSONSerialization.data(withJSONObject: envelope) else {
