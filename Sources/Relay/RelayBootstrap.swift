@@ -10,6 +10,9 @@ final class RelayBootstrap {
     private(set) var bridge: RelayBridge?
     private(set) var screenStream: RelayScreenStream?
     private(set) var agentApproval: RelayAgentApproval?
+    /// Mac 本地操作通知观察者
+    private var localObservers: [NSObjectProtocol] = []
+
     private init() {}
 
     /// 启动 Relay 模块
@@ -102,6 +105,9 @@ final class RelayBootstrap {
         self.screenStream = relayScreenStream
         self.agentApproval = relayAgentApproval
 
+        // 监听 Mac 本地操作，自动推送 surface 列表到手机
+        observeLocalChanges(bridge: relayBridge)
+
         // 连接到中继服务器
         relayClient.start()
 
@@ -110,8 +116,49 @@ final class RelayBootstrap {
         #endif
     }
 
+    /// 监听 Mac 端 tab/surface 变化，自动推送更新到手机
+    /// 安全：collectAllSurfaces 已不再切换 workspace
+    private func observeLocalChanges(bridge: RelayBridge) {
+        for observer in localObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        localObservers.removeAll()
+
+        // 防抖：每次事件后 0.5 秒推送，连续事件取消前一次
+        let lock = NSLock()
+        var pendingWork: DispatchWorkItem?
+
+        let debouncedPush = { [weak bridge] in
+            lock.lock()
+            pendingWork?.cancel()
+            let work = DispatchWorkItem { bridge?.pushSurfaceList() }
+            pendingWork = work
+            lock.unlock()
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.5, execute: work)
+        }
+
+        // Tab 焦点变化（创建/关闭/切换 tab 后触发）
+        localObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: .ghosttyDidFocusTab, object: nil, queue: nil
+            ) { _ in debouncedPush() }
+        )
+
+        // Surface 焦点变化（创建/关闭/切换 pane 后触发）
+        localObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: .ghosttyDidFocusSurface, object: nil, queue: nil
+            ) { _ in debouncedPush() }
+        )
+    }
+
     /// 停止 Relay 模块
     func stop() {
+        for observer in localObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        localObservers.removeAll()
+
         screenStream?.stopAll()
         client?.stop()
         client = nil
