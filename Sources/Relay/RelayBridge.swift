@@ -135,6 +135,16 @@ final class RelayBridge {
                 self.handleReadScreen(surfaceID: surfaceID, requestID: requestID)
             }
 
+        // Claude JSONL 消息读取（直接从 Claude Code 会话文件读取，不解析终端）
+        case "claude.messages":
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else { return }
+                let surfaceID = params?["surface_id"] as? String ?? ""
+                let afterSeq = params?["after_seq"] as? Int ?? 0
+                let result = self.readClaudeMessages(surfaceID: surfaceID, afterSeq: afterSeq)
+                self.sendRPCResponse(requestID: requestID, result: result)
+            }
+
         // 其他终端命令（转发到本地 Unix socket，V2 API 内部通过 surface_id 定位 workspace）
         default:
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -507,5 +517,189 @@ final class RelayBridge {
 
         return String(data: responseBuffer, encoding: .utf8)?
             .trimmingCharacters(in: .newlines)
+    }
+
+    // MARK: - Claude JSONL 消息读取
+
+    /// 从 Claude Code 的 JSONL 会话文件读取结构化消息
+    /// 跟 happy 项目的 sessionScanner 一样，直接读文件而非解析终端
+    private func readClaudeMessages(surfaceID: String, afterSeq: Int) -> [String: Any] {
+        // 1. 获取 surface 的工作目录
+        guard let cwd = getSurfaceCwd(surfaceID: surfaceID) else {
+            return ["error": "无法获取工作目录", "messages": []]
+        }
+
+        // 2. 构造 Claude 项目路径
+        let claudeProjectDir = claudeProjectPath(forCwd: cwd)
+        let fm = FileManager.default
+
+        guard fm.fileExists(atPath: claudeProjectDir) else {
+            return ["error": "Claude 项目目录不存在: \(claudeProjectDir)", "messages": []]
+        }
+
+        // 3. 找到最新的 .jsonl 文件（最近修改的会话）
+        guard let jsonlPath = findLatestJsonl(in: claudeProjectDir) else {
+            return ["error": "未找到会话文件", "messages": []]
+        }
+
+        // 4. 读取并解析 JSONL
+        guard let data = fm.contents(atPath: jsonlPath),
+              let content = String(data: data, encoding: .utf8) else {
+            return ["error": "无法读取会话文件", "messages": []]
+        }
+
+        let lines = content.components(separatedBy: "\n")
+        var messages: [[String: Any]] = []
+        var seq = 0
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+
+            guard let lineData = trimmed.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
+                continue
+            }
+
+            let msgType = json["type"] as? String ?? ""
+
+            // 跳过内部事件
+            let internalTypes: Set<String> = [
+                "file-history-snapshot", "change", "queue-operation", "permission-mode",
+            ]
+            if internalTypes.contains(msgType) { continue }
+
+            // 只处理 user 和 assistant 消息
+            guard msgType == "user" || msgType == "assistant" else { continue }
+
+            seq += 1
+            if seq <= afterSeq { continue }
+
+            // 提取消息内容
+            var msgResult: [String: Any] = [
+                "seq": seq,
+                "type": msgType,
+                "uuid": json["uuid"] as? String ?? "",
+                "timestamp": json["timestamp"] as? String ?? "",
+            ]
+
+            if let message = json["message"] as? [String: Any] {
+                if let content = message["content"] {
+                    if let textContent = content as? String {
+                        // user 消息的 content 可能是纯文本
+                        msgResult["content"] = [["type": "text", "text": textContent]]
+                    } else if let blocks = content as? [[String: Any]] {
+                        // assistant 消息的 content 是 block 数组
+                        var cleanBlocks: [[String: Any]] = []
+                        for block in blocks {
+                            let blockType = block["type"] as? String ?? ""
+                            switch blockType {
+                            case "text":
+                                cleanBlocks.append([
+                                    "type": "text",
+                                    "text": block["text"] as? String ?? "",
+                                ])
+                            case "thinking":
+                                // 跳过 thinking 内容（不显示给用户）
+                                continue
+                            case "tool_use":
+                                cleanBlocks.append([
+                                    "type": "tool_use",
+                                    "name": block["name"] as? String ?? "",
+                                    "id": block["id"] as? String ?? "",
+                                    "input": block["input"] ?? [:],
+                                ])
+                            case "tool_result":
+                                cleanBlocks.append([
+                                    "type": "tool_result",
+                                    "tool_use_id": block["tool_use_id"] as? String ?? "",
+                                    "content": block["content"] as? String ?? "",
+                                ])
+                            default:
+                                continue
+                            }
+                        }
+                        msgResult["content"] = cleanBlocks
+                    }
+                }
+
+                // 附加模型和用量信息
+                if let model = message["model"] as? String {
+                    msgResult["model"] = model
+                }
+            }
+
+            messages.append(msgResult)
+        }
+
+        #if DEBUG
+        dlog("[relay] claude.messages: surfaceID=\(surfaceID.prefix(8)) cwd=\(cwd) jsonl=\(jsonlPath.components(separatedBy: "/").last ?? "?") total=\(messages.count) afterSeq=\(afterSeq)")
+        #endif
+
+        return [
+            "messages": messages,
+            "session_file": jsonlPath.components(separatedBy: "/").last ?? "",
+            "total_seq": seq,
+        ]
+    }
+
+    /// 获取 surface 的工作目录
+    private func getSurfaceCwd(surfaceID: String) -> String? {
+        // 通过 surface.list 查询所有 workspace，找到包含该 surface 的 cwd
+        guard let wsResp = sendJsonRPC(method: "workspace.list", params: nil),
+              let wsResult = wsResp["result"] as? [String: Any],
+              let workspaces = wsResult["workspaces"] as? [[String: Any]] else {
+            return nil
+        }
+
+        for ws in workspaces {
+            guard let wsID = ws["id"] as? String else { continue }
+            if let surfResp = sendJsonRPC(method: "surface.list", params: ["workspace_id": wsID]),
+               let surfResult = surfResp["result"] as? [String: Any],
+               let surfaces = surfResult["surfaces"] as? [[String: Any]] {
+                if let surf = surfaces.first(where: { ($0["id"] as? String) == surfaceID }) {
+                    // 优先用 surface 的 cwd，其次用 workspace 的 current_directory
+                    if let cwd = surf["cwd"] as? String, !cwd.isEmpty {
+                        return cwd
+                    }
+                    if let wsCwd = ws["current_directory"] as? String, !wsCwd.isEmpty {
+                        return wsCwd
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
+    /// 将工作目录转换为 Claude 项目路径
+    /// /Users/jackie/code/cmux → ~/.claude/projects/-Users-jackie-code-cmux/
+    private func claudeProjectPath(forCwd cwd: String) -> String {
+        let expandedCwd: String
+        if cwd.hasPrefix("~/") {
+            expandedCwd = FileManager.default.homeDirectoryForCurrentUser.path + String(cwd.dropFirst(1))
+        } else {
+            expandedCwd = cwd
+        }
+        let projectHash = expandedCwd.replacingOccurrences(of: "/", with: "-")
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return "\(home)/.claude/projects/\(projectHash)"
+    }
+
+    /// 找到目录中最新修改的 .jsonl 文件
+    private func findLatestJsonl(in directory: String) -> String? {
+        let fm = FileManager.default
+        guard let contents = try? fm.contentsOfDirectory(atPath: directory) else { return nil }
+
+        let jsonlFiles = contents
+            .filter { $0.hasSuffix(".jsonl") }
+            .compactMap { filename -> (path: String, date: Date)? in
+                let path = "\(directory)/\(filename)"
+                guard let attrs = try? fm.attributesOfItem(atPath: path),
+                      let modDate = attrs[.modificationDate] as? Date else { return nil }
+                return (path, modDate)
+            }
+            .sorted { $0.date > $1.date }
+
+        return jsonlFiles.first?.path
     }
 }
