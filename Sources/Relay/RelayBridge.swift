@@ -59,6 +59,10 @@ final class RelayBridge {
         // 请求 ID（优先使用 payload 中的 id，兼容不同格式）
         let requestID = payload["id"] as? Int ?? Int(seq)
 
+        #if DEBUG
+        dlog("[relay] RPC method='\(method)' id=\(requestID) payload.keys=\(payload.keys.sorted())")
+        #endif
+
         switch msgType {
         case "rpc_request":
             handleRPCRequest(method: method, params: params, requestID: requestID)
@@ -98,9 +102,15 @@ final class RelayBridge {
 
         // surface.list 拦截：遍历所有 workspace 获取完整列表
         case "surface.list":
+            #if DEBUG
+            dlog("[relay] surface.list 拦截, requestID=\(requestID)")
+            #endif
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self else { return }
                 let allSurfaces = self.collectAllSurfaces()
+                #if DEBUG
+                dlog("[relay] surface.list 完成, 共 \(allSurfaces.count) 个 surface")
+                #endif
                 self.sendRPCResponse(requestID: requestID, result: ["surfaces": allSurfaces])
             }
 
@@ -123,7 +133,18 @@ final class RelayBridge {
                 self.handleReadScreen(surfaceID: surfaceID, requestID: requestID)
             }
 
-        // 终端命令（转发到本地 Unix socket）
+        // 终端输入命令（需要自动切换 workspace）
+        case "surface.send_text", "surface.send_key":
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else { return }
+                // 确保切换到目标 surface 所在的 workspace
+                if let surfaceID = params?["surface_id"] as? String, !surfaceID.isEmpty {
+                    _ = self.switchToWorkspaceContaining(surfaceID: surfaceID)
+                }
+                self.forwardToSocket(method: method, params: params, requestID: requestID)
+            }
+
+        // 其他终端命令（转发到本地 Unix socket）
         default:
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self else { return }
@@ -253,6 +274,9 @@ final class RelayBridge {
 
     /// 发送 RPC 响应（Envelope 格式）回手机端
     private func sendRPCResponse(requestID: Int, result: [String: Any]) {
+        #if DEBUG
+        dlog("[relay] sendRPCResponse id=\(requestID) keys=\(result.keys.sorted()) client=\(relayClient != nil) connected=\(relayClient?.status == .connected)")
+        #endif
         var responsePayload = result
         responsePayload["id"] = requestID
 
