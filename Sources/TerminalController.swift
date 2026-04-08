@@ -4829,7 +4829,8 @@ class TerminalController {
                     "pane_id": v2OrNull(paneUUID?.uuidString),
                     "pane_ref": v2Ref(kind: .pane, uuid: paneUUID),
                     "index_in_pane": v2OrNull(indexInPaneByPanelId[panel.id]),
-                    "selected_in_pane": v2OrNull(selectedInPaneByPanelId[panel.id])
+                    "selected_in_pane": v2OrNull(selectedInPaneByPanelId[panel.id]),
+                    "cwd": v2OrNull(ws.panelDirectories[panel.id])
                 ]
                 if let browserPanel = panel as? BrowserPanel {
                     item["developer_tools_visible"] = browserPanel.isDeveloperToolsVisible()
