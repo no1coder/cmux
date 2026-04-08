@@ -10,7 +10,6 @@ final class RelayBootstrap {
     private(set) var bridge: RelayBridge?
     private(set) var screenStream: RelayScreenStream?
     private(set) var agentApproval: RelayAgentApproval?
-
     private init() {}
 
     /// 启动 Relay 模块
