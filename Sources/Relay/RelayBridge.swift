@@ -1309,11 +1309,29 @@ final class RelayBridge {
                 let cwd = self.getSurfaceCwd(surfaceID: surfaceID) ?? ""
                 let projectDir = self.claudeProjectPath(forCwd: cwd)
                 let path = "\(projectDir)/\(sessionId).jsonl"
-                guard FileManager.default.fileExists(atPath: path) else { return }
-                jsonlPath = path
+                if FileManager.default.fileExists(atPath: path) {
+                    jsonlPath = path
+                } else if let fallback = self.findLatestJsonlByCwd(surfaceID: surfaceID) {
+                    // session store 有记录但 JSONL 文件不存在，回退到 CWD 查找
+                    #if DEBUG
+                    dlog("[relay] claude.watch: session \(sessionId.prefix(8)) 的 JSONL 不存在，回退到 CWD 查找")
+                    #endif
+                    jsonlPath = fallback
+                } else {
+                    #if DEBUG
+                    dlog("[relay] claude.watch: 无法定位 JSONL 文件 (session=\(sessionId.prefix(8)), cwd=\(cwd))")
+                    #endif
+                    return
+                }
             } else if let fallback = self.findLatestJsonlByCwd(surfaceID: surfaceID) {
+                #if DEBUG
+                dlog("[relay] claude.watch: session store 无记录，使用 CWD 回退")
+                #endif
                 jsonlPath = fallback
             } else {
+                #if DEBUG
+                dlog("[relay] claude.watch: 无法定位 JSONL 文件 (surface=\(surfaceID.prefix(8)), 无 session 且 CWD 查找失败)")
+                #endif
                 return
             }
 
