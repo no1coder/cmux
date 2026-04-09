@@ -465,12 +465,12 @@ final class RelayBridge {
             let lastContent = lastLines.joined(separator: "\n")
 
             // Claude Code TUI 就绪信号：
-            // - 出现 box-drawing 边框（╭╮╰╯）表示 TUI 已渲染
-            // - 不再是 shell prompt（说明新进程已接管终端）
-            let hasBoxDrawing = lastContent.contains("╭") || lastContent.contains("╰")
-            let noShellPrompt = !looksLikeShellPrompt(lastContent)
+            // - 出现 box-drawing 边框（╭╮╰╯─）表示 TUI 已渲染
+            // - 出现 Context/Usage 状态栏
+            let hasBoxDrawing = lastContent.contains("╭") || lastContent.contains("╰") || lastContent.contains("───")
+            let hasStatusBar = lastContent.contains("Context") && lastContent.contains("%")
 
-            if hasBoxDrawing && noShellPrompt {
+            if hasBoxDrawing || hasStatusBar {
                 #if DEBUG
                 dlog("[relay] Claude Code 就绪信号检测到")
                 #endif
