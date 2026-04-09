@@ -218,7 +218,10 @@ final class RelayBridge {
         case "claude.switch_model":
             let surfaceID = params?["surface_id"] as? String ?? ""
             let modelKey = params?["model"] as? String ?? ""
-            guard Self.isValidID(surfaceID), !modelKey.isEmpty else {
+            // modelKey 白名单校验：只允许字母、数字、连字符、点，防止命令注入
+            let modelKeyValid = !modelKey.isEmpty && modelKey.count <= 100
+                && modelKey.range(of: #"^[a-zA-Z0-9.\-]+$"#, options: .regularExpression) != nil
+            guard Self.isValidID(surfaceID), modelKeyValid else {
                 sendRPCResponse(requestID: requestID, result: ["error": "invalid params"])
                 return
             }
@@ -364,8 +367,9 @@ final class RelayBridge {
         dlog("[relay] 模型切换开始: surface=\(surfaceID.prefix(8)) model=\(modelKey)")
         #endif
 
-        // 1. 查找 session ID
-        guard let sessionId = lookupSessionId(forSurface: surfaceID) else {
+        // 1. 查找 session ID 并校验格式
+        guard let sessionId = lookupSessionId(forSurface: surfaceID),
+              Self.isValidID(sessionId) else {
             #if DEBUG
             dlog("[relay] 模型切换失败: 找不到 session ID")
             #endif
@@ -479,8 +483,8 @@ final class RelayBridge {
 
         guard let lastLine = lines.last else { return false }
 
-        // 常见 prompt 结尾符
-        let promptEndings: [Character] = ["$", "%", "#", ">", "❯", "→"]
+        // 常见 shell prompt 结尾符（不含 > 因为 Claude Code 输入提示也用 >）
+        let promptEndings: [Character] = ["$", "%", "#", "❯", "→"]
         if let lastChar = lastLine.last, promptEndings.contains(lastChar) {
             return true
         }
@@ -494,21 +498,34 @@ final class RelayBridge {
     }
 
     /// 轮询等待 Claude Code 启动就绪
+    /// 先等 2 秒让进程启动（跳过命令回显），再检测 Claude TUI 特征
     private func pollForClaudeReady(surfaceID: String, timeoutSeconds: Int) -> Bool {
+        // 先等 2 秒，跳过命令回显阶段（回显包含 "claude" 会导致误判）
+        usleep(2_000_000)
+        let remainingSeconds = max(timeoutSeconds - 2, 3)
         let intervalMs: UInt32 = 500_000  // 500ms
-        let maxAttempts = (timeoutSeconds * 1000) / 500
+        let maxAttempts = (remainingSeconds * 1000) / 500
+
+        // 记录初始终端内容用于变化检测
+        let initialText = readTerminalText(surfaceID: surfaceID) ?? ""
 
         for _ in 0..<maxAttempts {
             usleep(intervalMs)
             guard let text = readTerminalText(surfaceID: surfaceID) else { continue }
 
-            let lastLines = text.components(separatedBy: "\n").suffix(10)
-            let lastContent = lastLines.joined(separator: "\n").lowercased()
+            // 终端内容与初始快照不同，说明有新输出（Claude 正在启动）
+            guard text != initialText else { continue }
 
-            if lastContent.contains("resum") ||
-               lastContent.contains("claude") ||
-               lastContent.contains("╭") ||
-               lastContent.contains("│") {
+            let lastLines = text.components(separatedBy: "\n").suffix(10)
+            let lastContent = lastLines.joined(separator: "\n")
+
+            // Claude Code TUI 就绪信号：
+            // - 出现 box-drawing 边框（╭╮╰╯）表示 TUI 已渲染
+            // - 不再是 shell prompt（说明新进程已接管终端）
+            let hasBoxDrawing = lastContent.contains("╭") || lastContent.contains("╰")
+            let noShellPrompt = !looksLikeShellPrompt(lastContent)
+
+            if hasBoxDrawing && noShellPrompt {
                 #if DEBUG
                 dlog("[relay] Claude Code 就绪信号检测到")
                 #endif
