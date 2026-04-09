@@ -1020,10 +1020,8 @@ final class RelayBridge {
                 return ["messages": [] as [Any], "session_file": "\(sessionId).jsonl", "total_seq": 0]
             }
         } else {
-            guard let fallback = findLatestJsonlByCwd(surfaceID: surfaceID) else {
-                return ["error": "无法定位会话文件", "messages": []]
-            }
-            jsonlPath = fallback
+            // 不使用 CWD 回退，避免匹配到同目录其他 Claude 实例的会话
+            return ["error": "session_not_found", "messages": [] as [Any], "total_seq": 0]
         }
 
         // 安全：验证最终路径必须在 ~/.claude/projects/ 下
@@ -1302,35 +1300,21 @@ final class RelayBridge {
             // 如果已在监听，先停止
             self.stopWatchingClaudeSync(surfaceID: surfaceID)
 
-            // 定位 JSONL 文件
-            let jsonlPath: String
-            if let sessionId = self.lookupSessionId(forSurface: surfaceID),
-               Self.isValidID(sessionId) {
-                let cwd = self.getSurfaceCwd(surfaceID: surfaceID) ?? ""
-                let projectDir = self.claudeProjectPath(forCwd: cwd)
-                let path = "\(projectDir)/\(sessionId).jsonl"
-                if FileManager.default.fileExists(atPath: path) {
-                    jsonlPath = path
-                } else if let fallback = self.findLatestJsonlByCwd(surfaceID: surfaceID) {
-                    // session store 有记录但 JSONL 文件不存在，回退到 CWD 查找
-                    #if DEBUG
-                    dlog("[relay] claude.watch: session \(sessionId.prefix(8)) 的 JSONL 不存在，回退到 CWD 查找")
-                    #endif
-                    jsonlPath = fallback
-                } else {
-                    #if DEBUG
-                    dlog("[relay] claude.watch: 无法定位 JSONL 文件 (session=\(sessionId.prefix(8)), cwd=\(cwd))")
-                    #endif
-                    return
-                }
-            } else if let fallback = self.findLatestJsonlByCwd(surfaceID: surfaceID) {
+            // 定位 JSONL 文件（严格通过 session store 匹配，不使用 CWD 回退）
+            // CWD 回退会在同目录多个 Claude 实例时匹配到错误的会话
+            guard let sessionId = self.lookupSessionId(forSurface: surfaceID),
+                  Self.isValidID(sessionId) else {
                 #if DEBUG
-                dlog("[relay] claude.watch: session store 无记录，使用 CWD 回退")
+                dlog("[relay] claude.watch: session store 无此 surface 记录 (\(surfaceID.prefix(8)))，等待 SessionStart hook 注册")
                 #endif
-                jsonlPath = fallback
-            } else {
+                return
+            }
+            let cwd = self.getSurfaceCwd(surfaceID: surfaceID) ?? ""
+            let projectDir = self.claudeProjectPath(forCwd: cwd)
+            let jsonlPath = "\(projectDir)/\(sessionId).jsonl"
+            guard FileManager.default.fileExists(atPath: jsonlPath) else {
                 #if DEBUG
-                dlog("[relay] claude.watch: 无法定位 JSONL 文件 (surface=\(surfaceID.prefix(8)), 无 session 且 CWD 查找失败)")
+                dlog("[relay] claude.watch: JSONL 文件不存在 (session=\(sessionId.prefix(8)), path=\(jsonlPath.components(separatedBy: "/").last ?? "?"))")
                 #endif
                 return
             }
