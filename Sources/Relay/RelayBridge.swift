@@ -384,24 +384,30 @@ final class RelayBridge {
         // 2. 推送"切换中"事件（手机端显示动画）
         pushEvent("claude.model_switching", payload: ["model": modelKey])
 
-        // 3. 发送 Ctrl+C 终止 Claude Code
-        _ = sendJsonRPC(method: "surface.send_key", params: [
+        // 3. 发送 /exit 命令退出 Claude Code
+        // 注意：Ctrl+C 在 Claude Code idle 状态下不会退出，必须用 /exit
+        _ = sendJsonRPC(method: "surface.send_text", params: [
             "surface_id": surfaceID,
-            "key": "ctrl-c",
+            "text": "/exit\n",
         ])
 
         // 4. 轮询等待 shell prompt 出现
         let promptReady = pollForShellPrompt(surfaceID: surfaceID, timeoutSeconds: 5)
         if !promptReady {
-            // 可能 Claude 没完全退出，再发一次 Ctrl+C
+            // /exit 可能没生效（Claude 在执行中），尝试 Ctrl+C 中断后再 /exit
             #if DEBUG
-            dlog("[relay] 模型切换: 第一次 Ctrl+C 后未检测到 prompt，重试")
+            dlog("[relay] 模型切换: /exit 后未检测到 prompt，尝试 Ctrl+C")
             #endif
             _ = sendJsonRPC(method: "surface.send_key", params: [
                 "surface_id": surfaceID,
                 "key": "ctrl-c",
             ])
-            let retryReady = pollForShellPrompt(surfaceID: surfaceID, timeoutSeconds: 3)
+            Thread.sleep(forTimeInterval: 0.5)
+            _ = sendJsonRPC(method: "surface.send_text", params: [
+                "surface_id": surfaceID,
+                "text": "/exit\n",
+            ])
+            let retryReady = pollForShellPrompt(surfaceID: surfaceID, timeoutSeconds: 5)
             if !retryReady {
                 #if DEBUG
                 dlog("[relay] 模型切换失败: 等待 shell prompt 超时")
