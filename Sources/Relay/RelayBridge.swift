@@ -27,6 +27,9 @@ final class RelayBridge {
     /// E2E 加密管理器（可选：nil 时不加密，兼容旧版本）
     var e2eCrypto: RelayE2ECrypto?
 
+    /// 混合消息处理器（手机发图片 + 文字到终端）
+    lazy var composedMessageHandler = RelayComposedMessageHandler(bridge: self)
+
     // MARK: - JSONL 文件监听（轮询→推送）
 
     /// 当前监听的 JSONL 文件路径 → (fileDescriptor, dispatchSource, lastFileSize)
@@ -35,6 +38,13 @@ final class RelayBridge {
     private var watchedSurfaces: [String: String] = [:]
     /// 监听相关操作的串行队列
     private let watcherQueue = DispatchQueue(label: "com.cmux.relay.jsonlWatcher")
+
+    // MARK: - 模型切换状态
+
+    /// 模型切换互斥标志，防止并发切换
+    private var isModelSwitching = false
+    /// 保护 isModelSwitching 的队列
+    private let modelSwitchQueue = DispatchQueue(label: "com.cmux.relay.modelSwitch")
 
     // MARK: - 持久化 Socket 连接
 
@@ -59,10 +69,11 @@ final class RelayBridge {
         "pane.focus", "pane.last",
     ]
 
-    /// surfaceID/sessionId 格式验证：仅允许 UUID 字符 + 连字符
-    private static func isValidID(_ id: String) -> Bool {
-        guard !id.isEmpty, id.count <= 128 else { return false }
-        return id.allSatisfy { $0.isHexDigit || $0 == "-" || $0.isLetter }
+    /// surfaceID/sessionId 格式验证：严格 UUID 格式或纯十六进制+连字符
+    static func isValidID(_ id: String) -> Bool {
+        guard !id.isEmpty, id.count <= 36 else { return false }
+        // 严格限制为 UUID 字符：十六进制数字 + 连字符
+        return id.allSatisfy { $0.isHexDigit || $0 == "-" }
     }
 
     // MARK: - 初始化
@@ -95,9 +106,16 @@ final class RelayBridge {
             return
         }
 
-        // E2E 解密：如果 payload 是加密格式，则解密还原
+        // E2E 解密：已配对时强制要求加密格式，拒绝明文
         let payload: [String: Any]
-        if RelayE2ECrypto.isEncrypted(rawPayload), let crypto = e2eCrypto {
+        if let crypto = e2eCrypto {
+            // 已启用 E2E 加密，必须是加密格式
+            guard RelayE2ECrypto.isEncrypted(rawPayload) else {
+                #if DEBUG
+                dlog("[relay] handleIncoming: 拒绝未加密的 payload（E2E 已启用）")
+                #endif
+                return
+            }
             guard let decrypted = crypto.decrypt(rawPayload) else {
                 #if DEBUG
                 dlog("[relay] handleIncoming: E2E 解密失败")
@@ -106,6 +124,7 @@ final class RelayBridge {
             }
             payload = decrypted
         } else {
+            // 未启用 E2E，接受明文
             payload = rawPayload
         }
 
@@ -195,6 +214,34 @@ final class RelayBridge {
                 self.handleReadScreen(surfaceID: surfaceID, requestID: requestID)
             }
 
+        // 模型切换：Ctrl+C 杀进程 → --resume + --model 重启
+        case "claude.switch_model":
+            let surfaceID = params?["surface_id"] as? String ?? ""
+            let modelKey = params?["model"] as? String ?? ""
+            guard Self.isValidID(surfaceID), !modelKey.isEmpty else {
+                sendRPCResponse(requestID: requestID, result: ["error": "invalid params"])
+                return
+            }
+            // 检查是否已有切换进行中
+            let canSwitch = modelSwitchQueue.sync { () -> Bool in
+                if isModelSwitching { return false }
+                isModelSwitching = true
+                return true
+            }
+            guard canSwitch else {
+                sendRPCResponse(requestID: requestID, result: ["error": "switch_in_progress"])
+                return
+            }
+            // 立即响应，切换结果通过事件推送
+            sendRPCResponse(requestID: requestID, result: ["ok": true, "switching": true])
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else { return }
+                defer {
+                    self.modelSwitchQueue.sync { self.isModelSwitching = false }
+                }
+                self.executeModelSwitch(surfaceID: surfaceID, modelKey: modelKey)
+            }
+
         // Claude 会话监听：手机进入聊天时开始，离开时停止
         case "claude.watch":
             let surfaceID = params?["surface_id"] as? String ?? ""
@@ -224,6 +271,14 @@ final class RelayBridge {
                 self.sendRPCResponse(requestID: requestID, result: result)
             }
 
+        // 混合消息（手机发图片+文字到终端）
+        case "composed_msg.start", "composed_msg.block", "composed_msg.end":
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else { return }
+                let result = self.composedMessageHandler.handleRPC(method: method, params: params)
+                self.sendRPCResponse(requestID: requestID, result: result)
+            }
+
         // 白名单内的方法：转发到本地 socket
         default:
             guard Self.allowedForwardMethods.contains(method) else {
@@ -238,6 +293,23 @@ final class RelayBridge {
     }
 
     // MARK: - 转发到本地 Socket
+
+    /// 内部直接调用的递增 RPC ID（从 90000 起，避免与普通 RPC id 冲突）
+    private static var nextDirectID: Int = 90000
+
+    /// 转发到本地 socket（不等待响应，供内部模块调用）
+    func forwardToSocketDirect(method: String, params: [String: Any]) {
+        Self.nextDirectID += 1
+        let rpcRequest: [String: Any] = [
+            "jsonrpc": "2.0",
+            "method": method,
+            "id": Self.nextDirectID,
+            "params": params,
+        ]
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: rpcRequest),
+              let jsonString = String(data: jsonData, encoding: .utf8) else { return }
+        _ = sendToUnixSocket(jsonString)
+    }
 
     /// 将 RPC 请求转发到本地 cmux Unix socket，返回结果
     /// V2 JSON-RPC 方法内部通过 surface_id 自动定位 workspace，无需手动切换
@@ -284,57 +356,246 @@ final class RelayBridge {
     // MARK: - V1 命令处理
 
     /// 通过 V1 文本协议读取终端屏幕内容
+    // MARK: - 模型切换（--resume + --model 重启）
+
+    /// 模型切换核心流程：Ctrl+C → 等 shell prompt → claude --resume → 等就绪
+    private func executeModelSwitch(surfaceID: String, modelKey: String) {
+        #if DEBUG
+        dlog("[relay] 模型切换开始: surface=\(surfaceID.prefix(8)) model=\(modelKey)")
+        #endif
+
+        // 1. 查找 session ID
+        guard let sessionId = lookupSessionId(forSurface: surfaceID) else {
+            #if DEBUG
+            dlog("[relay] 模型切换失败: 找不到 session ID")
+            #endif
+            pushEvent("claude.model_switched", payload: [
+                "model": modelKey,
+                "ok": false,
+                "error": "找不到当前会话，请确认 Claude Code 正在运行",
+            ])
+            return
+        }
+
+        // 2. 推送"切换中"事件（手机端显示动画）
+        pushEvent("claude.model_switching", payload: ["model": modelKey])
+
+        // 3. 发送 Ctrl+C 终止 Claude Code
+        _ = sendJsonRPC(method: "surface.send_key", params: [
+            "surface_id": surfaceID,
+            "key": "ctrl-c",
+        ])
+
+        // 4. 轮询等待 shell prompt 出现
+        let promptReady = pollForShellPrompt(surfaceID: surfaceID, timeoutSeconds: 5)
+        if !promptReady {
+            // 可能 Claude 没完全退出，再发一次 Ctrl+C
+            #if DEBUG
+            dlog("[relay] 模型切换: 第一次 Ctrl+C 后未检测到 prompt，重试")
+            #endif
+            _ = sendJsonRPC(method: "surface.send_key", params: [
+                "surface_id": surfaceID,
+                "key": "ctrl-c",
+            ])
+            let retryReady = pollForShellPrompt(surfaceID: surfaceID, timeoutSeconds: 3)
+            if !retryReady {
+                #if DEBUG
+                dlog("[relay] 模型切换失败: 等待 shell prompt 超时")
+                #endif
+                pushEvent("claude.model_switched", payload: [
+                    "model": modelKey,
+                    "ok": false,
+                    "error": "终止 Claude Code 超时，请手动重试",
+                ])
+                return
+            }
+        }
+
+        // 5. 构建重启命令
+        let resumeCommand: String
+        if modelKey.lowercased() == "default" {
+            resumeCommand = "claude --resume \(sessionId)\n"
+        } else {
+            resumeCommand = "claude --resume \(sessionId) --model \(modelKey)\n"
+        }
+
+        // 6. 发送重启命令
+        _ = sendJsonRPC(method: "surface.send_text", params: [
+            "surface_id": surfaceID,
+            "text": resumeCommand,
+        ])
+
+        // 7. 轮询等待 Claude Code 就绪
+        let claudeReady = pollForClaudeReady(surfaceID: surfaceID, timeoutSeconds: 15)
+
+        // 8. 推送结果
+        if claudeReady {
+            #if DEBUG
+            dlog("[relay] 模型切换成功: model=\(modelKey)")
+            #endif
+            pushEvent("claude.model_switched", payload: [
+                "model": modelKey,
+                "ok": true,
+            ])
+        } else {
+            #if DEBUG
+            dlog("[relay] 模型切换: Claude 可能已启动但未确认就绪，仍视为成功")
+            #endif
+            // 命令已发送，即使轮询超时也大概率已启动，视为成功
+            pushEvent("claude.model_switched", payload: [
+                "model": modelKey,
+                "ok": true,
+            ])
+        }
+    }
+
+    /// 轮询终端输出，检测 shell prompt 是否出现
+    private func pollForShellPrompt(surfaceID: String, timeoutSeconds: Int) -> Bool {
+        let intervalMs: UInt32 = 300_000  // 300ms
+        let maxAttempts = (timeoutSeconds * 1000) / 300
+
+        for _ in 0..<maxAttempts {
+            usleep(intervalMs)
+            guard let text = readTerminalText(surfaceID: surfaceID) else { continue }
+
+            let lastLines = text.components(separatedBy: "\n").suffix(5)
+            let lastContent = lastLines.joined(separator: "\n")
+
+            if looksLikeShellPrompt(lastContent) {
+                #if DEBUG
+                dlog("[relay] 检测到 shell prompt")
+                #endif
+                return true
+            }
+        }
+        return false
+    }
+
+    /// 判断终端文本最后几行是否像 shell prompt
+    private func looksLikeShellPrompt(_ text: String) -> Bool {
+        let lines = text.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+
+        guard let lastLine = lines.last else { return false }
+
+        // 常见 prompt 结尾符
+        let promptEndings: [Character] = ["$", "%", "#", ">", "❯", "→"]
+        if let lastChar = lastLine.last, promptEndings.contains(lastChar) {
+            return true
+        }
+
+        // zsh/bash prompt: "user@host dir %"
+        if lastLine.contains("@") && promptEndings.contains(where: { lastLine.contains(String($0)) }) {
+            return true
+        }
+
+        return false
+    }
+
+    /// 轮询等待 Claude Code 启动就绪
+    private func pollForClaudeReady(surfaceID: String, timeoutSeconds: Int) -> Bool {
+        let intervalMs: UInt32 = 500_000  // 500ms
+        let maxAttempts = (timeoutSeconds * 1000) / 500
+
+        for _ in 0..<maxAttempts {
+            usleep(intervalMs)
+            guard let text = readTerminalText(surfaceID: surfaceID) else { continue }
+
+            let lastLines = text.components(separatedBy: "\n").suffix(10)
+            let lastContent = lastLines.joined(separator: "\n").lowercased()
+
+            if lastContent.contains("resum") ||
+               lastContent.contains("claude") ||
+               lastContent.contains("╭") ||
+               lastContent.contains("│") {
+                #if DEBUG
+                dlog("[relay] Claude Code 就绪信号检测到")
+                #endif
+                return true
+            }
+        }
+
+        #if DEBUG
+        dlog("[relay] pollForClaudeReady 超时")
+        #endif
+        return false
+    }
+
     /// 如果目标 surface 不在当前 workspace，先自动切换
+    /// 优先使用 read_terminal_text（单行 base64 响应），不支持时回退到 read_screen
+    /// 所有 socket 操作在一个 socketQueue.sync 块内完成，避免重入死锁
     private func handleReadScreen(surfaceID: String, requestID: Int) {
         guard !surfaceID.isEmpty else {
             sendRPCResponse(requestID: requestID, result: ["error": "缺少 surface_id"])
             return
         }
 
-        // 尝试读取，如果失败（surface 不在当前 workspace），切换后重试
-        var response = sendV1Command("read_screen \(surfaceID)")
+        // 统一在 socketQueue 内执行所有 socket 操作，使用 _unsafe 方法避免重入
+        let result: [String: Any] = socketQueue.sync {
+            // 优先尝试 read_terminal_text（单行 "OK {base64}" 响应）
+            var response = _sendV1CommandUnsafe("read_terminal_text \(surfaceID)")
 
-        if response == nil || response?.hasPrefix("ERROR") == true {
-            // 尝试找到 surface 所在的 workspace 并切换
-            if switchToWorkspaceContaining(surfaceID: surfaceID) {
-                response = sendV1Command("read_screen \(surfaceID)")
+            // 如果命令不存在（旧版守护进程），回退到 read_screen
+            let useBase64: Bool
+            if let resp = response, resp.contains("Unknown command") {
+                useBase64 = false
+                response = _sendV1CommandUnsafe("read_screen \(surfaceID)")
+            } else {
+                useBase64 = true
             }
+
+            if response == nil || response?.hasPrefix("ERROR") == true {
+                // 尝试切换到 surface 所在的 workspace 后重试
+                if _switchToWorkspaceContainingUnsafe(surfaceID: surfaceID) {
+                    response = _sendV1CommandUnsafe(useBase64
+                        ? "read_terminal_text \(surfaceID)"
+                        : "read_screen \(surfaceID)")
+                }
+            }
+
+            guard let response, !response.hasPrefix("ERROR") else {
+                return ["error": response ?? "socket 通信失败"]
+            }
+
+            let lines: [String]
+            if useBase64 {
+                guard response.hasPrefix("OK ") else {
+                    return ["error": "unexpected response: \(response.prefix(100))"]
+                }
+                let base64Payload = String(response.dropFirst(3)).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !base64Payload.isEmpty, let data = Data(base64Encoded: base64Payload) {
+                    lines = String(decoding: data, as: UTF8.self).components(separatedBy: "\n")
+                } else {
+                    lines = []
+                }
+            } else {
+                lines = response.components(separatedBy: "\n")
+            }
+
+            return ["lines": lines, "surface_id": surfaceID]
         }
 
-        guard let response, !response.hasPrefix("ERROR") else {
-            sendRPCResponse(requestID: requestID, result: ["error": response ?? "socket 通信失败"])
-            return
-        }
-
-        let lines = response.components(separatedBy: "\n")
-        sendRPCResponse(requestID: requestID, result: [
-            "lines": lines,
-            "surface_id": surfaceID,
-        ])
+        sendRPCResponse(requestID: requestID, result: result)
     }
 
-    /// 切换到包含指定 surface 的 workspace
-    /// 先用 workspace_id 参数查找（不切换），找到后只做一次 select
-    /// - Returns: 是否成功切换
-    private func switchToWorkspaceContaining(surfaceID: String) -> Bool {
-        guard let wsResp = sendJsonRPC(method: "workspace.list", params: nil),
+    /// 切换到包含指定 surface 的 workspace（不持锁版本，必须在 socketQueue 内调用）
+    private func _switchToWorkspaceContainingUnsafe(surfaceID: String) -> Bool {
+        guard let wsResp = _sendJsonRPCUnsafe(method: "workspace.list", params: nil),
               let wsResult = wsResp["result"] as? [String: Any],
               let workspaces = wsResult["workspaces"] as? [[String: Any]] else {
             return false
         }
 
-        // 先查找 surface 所在的 workspace（不切换）
         for ws in workspaces {
             guard let wsID = ws["id"] as? String,
                   (ws["selected"] as? Bool) != true else { continue }
 
-            // 用 workspace_id 参数查询，不切换
-            if let surfResp = sendJsonRPC(method: "surface.list", params: ["workspace_id": wsID]),
+            if let surfResp = _sendJsonRPCUnsafe(method: "surface.list", params: ["workspace_id": wsID]),
                let surfResult = surfResp["result"] as? [String: Any],
                let surfaces = surfResult["surfaces"] as? [[String: Any]],
                surfaces.contains(where: { ($0["id"] as? String) == surfaceID }) {
-                // 找到了，只做一次 select
-                _ = sendJsonRPC(method: "workspace.select", params: ["workspace_id": wsID])
+                _ = _sendJsonRPCUnsafe(method: "workspace.select", params: ["workspace_id": wsID])
                 #if DEBUG
                 dlog("[relay] 切换到 workspace \(wsID.prefix(8))... 以操作 surface \(surfaceID.prefix(8))...")
                 #endif
@@ -342,6 +603,13 @@ final class RelayBridge {
             }
         }
         return false
+    }
+
+    /// 外部调用版本（自动加锁）
+    private func switchToWorkspaceContaining(surfaceID: String) -> Bool {
+        return socketQueue.sync {
+            _switchToWorkspaceContainingUnsafe(surfaceID: surfaceID)
+        }
     }
 
     // MARK: - 响应发送
@@ -379,7 +647,11 @@ final class RelayBridge {
     // MARK: - 出站事件推送（Mac → iOS）
 
     /// 推送 Mac 端产生的事件到手机（Envelope 格式）
-    func pushEvent(_ eventType: String, payload: [String: Any]) {
+    /// - Parameters:
+    ///   - eventType: 事件类型
+    ///   - payload: 事件数据
+    ///   - pushHint: APNs 离线推送提示（E2E 加密时 Relay 无法读取 payload，需要明文 hint）
+    func pushEvent(_ eventType: String, payload: [String: Any], pushHint: [String: String]? = nil) {
         #if DEBUG
         dlog("[relay] pushEvent: \(eventType), relayClient=\(relayClient != nil)")
         #endif
@@ -394,13 +666,18 @@ final class RelayBridge {
             finalPayload = eventPayload
         }
 
-        let envelope: [String: Any] = [
+        var envelope: [String: Any] = [
             "seq": 0,
             "ts": Int64(Date().timeIntervalSince1970),
             "from": "mac",
             "type": "event",
             "payload": finalPayload,
         ]
+
+        // 添加明文 push_hint（用于 Relay 在手机离线时决定是否发送 APNs）
+        if let pushHint {
+            envelope["push_hint"] = pushHint
+        }
 
         guard let data = try? JSONSerialization.data(withJSONObject: envelope) else {
             return
@@ -455,7 +732,7 @@ final class RelayBridge {
         return allSurfaces
     }
 
-    /// 发送 JSON-RPC 请求并返回解析后的响应
+    /// 发送 JSON-RPC 请求并返回解析后的响应（自动加锁）
     private func sendJsonRPC(method: String, params: [String: Any]?) -> [String: Any]? {
         var request: [String: Any] = [
             "jsonrpc": "2.0",
@@ -467,6 +744,25 @@ final class RelayBridge {
         guard let jsonData = try? JSONSerialization.data(withJSONObject: request),
               let jsonString = String(data: jsonData, encoding: .utf8),
               let response = sendToUnixSocket(jsonString),
+              let responseData = response.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any] else {
+            return nil
+        }
+        return parsed
+    }
+
+    /// 不持锁版本，供已在 socketQueue 内的代码调用
+    private func _sendJsonRPCUnsafe(method: String, params: [String: Any]?) -> [String: Any]? {
+        var request: [String: Any] = [
+            "jsonrpc": "2.0",
+            "method": method,
+            "id": Int(Date().timeIntervalSince1970 * 1000) % 1_000_000,
+        ]
+        if let params { request["params"] = params }
+
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: request),
+              let jsonString = String(data: jsonData, encoding: .utf8),
+              let response = _sendToUnixSocketUnsafe(jsonString),
               let responseData = response.data(using: .utf8),
               let parsed = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any] else {
             return nil
@@ -565,24 +861,51 @@ final class RelayBridge {
     // MARK: - Unix Socket I/O
 
     /// 发送 V1 文本命令到本地 Unix socket，返回响应字符串
+    /// 使用独立的一次性连接，避免多行响应（如 read_screen）污染持久化 socket 的接收缓冲区
+    /// 注意：不可在 socketQueue.sync 内部调用，否则死锁
     func sendV1Command(_ command: String) -> String? {
-        return sendToUnixSocket(command)
+        return socketQueue.sync {
+            _sendV1CommandUnsafe(command)
+        }
+    }
+
+    /// 读取指定 surface 的终端文本内容（解码 base64）
+    /// 必须在 socketQueue 外调用
+    private func readTerminalText(surfaceID: String) -> String? {
+        let response = sendV1Command("read_terminal_text \(surfaceID)")
+        guard let response, response.hasPrefix("OK ") else { return nil }
+        let base64 = String(response.dropFirst(3)).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !base64.isEmpty, let data = Data(base64Encoded: base64) else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// 不持锁版本，供已在 socketQueue 内的代码调用（如 handleReadScreen 的组合操作）
+    private func _sendV1CommandUnsafe(_ command: String) -> String? {
+        guard let fd = createConnection() else { return nil }
+        defer { close(fd) }
+        return sendAndRecv(fd: fd, json: command)
     }
 
     /// 发送 JSON 字符串到本地 Unix socket，返回响应字符串
     /// 内部复用持久化连接，发送失败时自动重连一次
+    /// 注意：不可在 socketQueue.sync 内部调用，否则死锁
     func sendToUnixSocket(_ json: String) -> String? {
         return socketQueue.sync {
-            // 尝试用持久化连接发送
-            if let fd = persistentFd, let result = sendAndRecv(fd: fd, json: json) {
-                return result
-            }
-            // 持久化连接不可用或发送失败，重连
-            closePersistentFd()
-            guard let fd = createConnection() else { return nil }
-            persistentFd = fd
-            return sendAndRecv(fd: fd, json: json)
+            _sendToUnixSocketUnsafe(json)
         }
+    }
+
+    /// 不持锁版本，供已在 socketQueue 内的代码调用
+    private func _sendToUnixSocketUnsafe(_ json: String) -> String? {
+        // 尝试用持久化连接发送
+        if let fd = persistentFd, let result = sendAndRecv(fd: fd, json: json) {
+            return result
+        }
+        // 持久化连接不可用或发送失败，重连
+        closePersistentFd()
+        guard let fd = createConnection() else { return nil }
+        persistentFd = fd
+        return sendAndRecv(fd: fd, json: json)
     }
 
     /// 创建新的 Unix socket 连接
@@ -613,6 +936,10 @@ final class RelayBridge {
             close(fd)
             return nil
         }
+
+        // 设置 recv 超时（10 秒），防止 read_screen 等命令卡死线程
+        var timeout = timeval(tv_sec: 10, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
 
         return fd
     }
@@ -673,6 +1000,45 @@ final class RelayBridge {
     /// Claude 项目数据的安全基础路径
     private static var claudeProjectsBase: String {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects").path
+    }
+
+    /// 检测系统注入的 user 消息（skill 展开、任务通知、命令输出等），这些不应显示在手机端
+    private static func isSystemInjectedUserMessage(_ json: [String: Any]) -> Bool {
+        guard let message = json["message"] as? [String: Any] else { return false }
+        let content = message["content"]
+
+        // 提取文本内容
+        var text = ""
+        if let str = content as? String {
+            text = str
+        } else if let blocks = content as? [[String: Any]] {
+            // 只检查第一个 text block
+            for block in blocks {
+                if (block["type"] as? String) == "text", let t = block["text"] as? String {
+                    text = t
+                    break
+                }
+            }
+        }
+
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        // Skill 展开内容
+        if trimmed.hasPrefix("Base directory for this skill:") { return true }
+        // 系统 XML 标签注入
+        let systemPrefixes = [
+            "<task-notification>",
+            "<command-name>",
+            "<local-command-caveat>",
+            "<local-command-stdout>",
+            "<local-command-stderr>",
+            "<system-reminder>",
+        ]
+        for prefix in systemPrefixes {
+            if trimmed.hasPrefix(prefix) { return true }
+        }
+        return false
     }
 
     private func readClaudeMessages(surfaceID: String, afterSeq: Int) -> [String: Any] {
@@ -740,6 +1106,9 @@ final class RelayBridge {
 
             // 只处理 user 和 assistant 消息
             guard msgType == "user" || msgType == "assistant" else { continue }
+
+            // 过滤系统注入的 user 消息（skill 展开、任务通知、命令输出等）
+            if msgType == "user", Self.isSystemInjectedUserMessage(json) { continue }
 
             seq += 1
             if seq <= afterSeq { continue }
@@ -1084,6 +1453,9 @@ final class RelayBridge {
 
             let msgType = json["type"] as? String ?? ""
             guard msgType == "user" || msgType == "assistant" else { continue }
+
+            // 过滤系统注入的 user 消息
+            if msgType == "user", Self.isSystemInjectedUserMessage(json) { continue }
 
             // 复用 readClaudeMessages 的消息解析逻辑
             var msgResult: [String: Any] = [
