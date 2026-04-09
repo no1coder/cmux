@@ -384,42 +384,25 @@ final class RelayBridge {
         // 2. 推送"切换中"事件（手机端显示动画）
         pushEvent("claude.model_switching", payload: ["model": modelKey])
 
-        // 3. 发送 /exit 命令退出 Claude Code
-        // 注意：Ctrl+C 在 Claude Code idle 状态下不会退出，必须用 /exit
+        // 3. 退出 Claude Code
+        // 如果 Claude 在执行中，先 Ctrl+C 中断，再 /exit
+        // 如果 Claude 在 idle，直接 /exit 即可（Ctrl+C 在 idle 下被忽略）
+        _ = sendJsonRPC(method: "surface.send_key", params: [
+            "surface_id": surfaceID,
+            "key": "ctrl-c",
+        ])
+        Thread.sleep(forTimeInterval: 0.3)
         _ = sendJsonRPC(method: "surface.send_text", params: [
             "surface_id": surfaceID,
             "text": "/exit\n",
         ])
 
-        // 4. 轮询等待 shell prompt 出现
-        let promptReady = pollForShellPrompt(surfaceID: surfaceID, timeoutSeconds: 5)
-        if !promptReady {
-            // /exit 可能没生效（Claude 在执行中），尝试 Ctrl+C 中断后再 /exit
-            #if DEBUG
-            dlog("[relay] 模型切换: /exit 后未检测到 prompt，尝试 Ctrl+C")
-            #endif
-            _ = sendJsonRPC(method: "surface.send_key", params: [
-                "surface_id": surfaceID,
-                "key": "ctrl-c",
-            ])
-            Thread.sleep(forTimeInterval: 0.5)
-            _ = sendJsonRPC(method: "surface.send_text", params: [
-                "surface_id": surfaceID,
-                "text": "/exit\n",
-            ])
-            let retryReady = pollForShellPrompt(surfaceID: surfaceID, timeoutSeconds: 5)
-            if !retryReady {
-                #if DEBUG
-                dlog("[relay] 模型切换失败: 等待 shell prompt 超时")
-                #endif
-                pushEvent("claude.model_switched", payload: [
-                    "model": modelKey,
-                    "ok": false,
-                    "error": "终止 Claude Code 超时，请手动重试",
-                ])
-                return
-            }
-        }
+        // 4. 等待 Claude Code 退出并回到 shell
+        // Ghostty shell integration 会检测 promptIdle，日志显示 /exit 后约 1 秒回到 prompt
+        Thread.sleep(forTimeInterval: 2.0)
+        #if DEBUG
+        dlog("[relay] 模型切换: /exit 已发送，等待 2 秒后继续")
+        #endif
 
         // 5. 构建重启命令
         let resumeCommand: String
@@ -457,50 +440,6 @@ final class RelayBridge {
                 "ok": true,
             ])
         }
-    }
-
-    /// 轮询终端输出，检测 shell prompt 是否出现
-    private func pollForShellPrompt(surfaceID: String, timeoutSeconds: Int) -> Bool {
-        let intervalMs: UInt32 = 300_000  // 300ms
-        let maxAttempts = (timeoutSeconds * 1000) / 300
-
-        for _ in 0..<maxAttempts {
-            usleep(intervalMs)
-            guard let text = readTerminalText(surfaceID: surfaceID) else { continue }
-
-            let lastLines = text.components(separatedBy: "\n").suffix(5)
-            let lastContent = lastLines.joined(separator: "\n")
-
-            if looksLikeShellPrompt(lastContent) {
-                #if DEBUG
-                dlog("[relay] 检测到 shell prompt")
-                #endif
-                return true
-            }
-        }
-        return false
-    }
-
-    /// 判断终端文本最后几行是否像 shell prompt
-    private func looksLikeShellPrompt(_ text: String) -> Bool {
-        let lines = text.components(separatedBy: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-
-        guard let lastLine = lines.last else { return false }
-
-        // 常见 shell prompt 结尾符（不含 > 因为 Claude Code 输入提示也用 >）
-        let promptEndings: [Character] = ["$", "%", "#", "❯", "→"]
-        if let lastChar = lastLine.last, promptEndings.contains(lastChar) {
-            return true
-        }
-
-        // zsh/bash prompt: "user@host dir %"
-        if lastLine.contains("@") && promptEndings.contains(where: { lastLine.contains(String($0)) }) {
-            return true
-        }
-
-        return false
     }
 
     /// 轮询等待 Claude Code 启动就绪
