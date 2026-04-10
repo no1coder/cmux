@@ -192,6 +192,48 @@ struct RelayPopoverView: View {
 
             Divider()
 
+            // 允许访问的目录
+            DisclosureGroup(
+                String(localized: "relay.dirs.title", defaultValue: "允许访问的目录")
+            ) {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(stateModel.allowedDirectories, id: \.self) { dir in
+                        HStack {
+                            Text(dir)
+                                .font(.system(.caption, design: .monospaced))
+                            Spacer()
+                            Button {
+                                stateModel.removeDirectory(dir)
+                            } label: {
+                                Image(systemName: "minus.circle")
+                                    .foregroundStyle(.red)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.vertical, 2)
+                    }
+                    HStack {
+                        TextField("~/path", text: $stateModel.newDirectoryInput)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(.caption, design: .monospaced))
+                            .onSubmit { stateModel.addDirectory() }
+                        Button {
+                            stateModel.addDirectory()
+                        } label: {
+                            Image(systemName: "plus.circle")
+                                .foregroundStyle(.green)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(stateModel.newDirectoryInput.isEmpty)
+                    }
+                }
+            }
+            .font(.caption)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+
+            Divider()
+
             // 操作按钮
             HStack(spacing: 12) {
                 // 启用/暂停开关
@@ -204,6 +246,7 @@ struct RelayPopoverView: View {
                 }
                 .toggleStyle(.switch)
                 .controlSize(.small)
+                .tint(.green)
                 .accessibilityHint(String(localized: "relay.accessibility.toggleHint", defaultValue: "Enable or pause mobile remote access"))
 
                 Spacer()
@@ -279,6 +322,8 @@ final class RelayStateModel: ObservableObject {
     @Published var pairingTimeRemaining: Int = 0
     @Published var error: String?
     @Published var showUnpairConfirm: Bool = false
+    @Published var allowedDirectories: [String] = []
+    @Published var newDirectoryInput: String = ""
 
     private var pairingTimer: Timer?
     private var pairingExpiresAt: Date?
@@ -335,6 +380,8 @@ final class RelayStateModel: ObservableObject {
         if let client = RelayBootstrap.shared.client {
             isConnected = client.status == .connected
         }
+
+        allowedDirectories = RelaySettings.allowedDirectories
     }
 
     var connectionStatusText: String {
@@ -360,6 +407,22 @@ final class RelayStateModel: ObservableObject {
             if RelaySettings.pairedPhoneID != nil { return .orange }
             return .gray
         }
+    }
+
+    // MARK: - 目录管理
+
+    func addDirectory() {
+        let dir = newDirectoryInput.trimmingCharacters(in: .whitespaces)
+        guard !dir.isEmpty, !allowedDirectories.contains(dir) else { return }
+        allowedDirectories.append(dir)
+        RelaySettings.allowedDirectories = allowedDirectories
+        newDirectoryInput = ""
+        // 注意：目录变更需要重连才对新沙箱生效
+    }
+
+    func removeDirectory(_ dir: String) {
+        allowedDirectories.removeAll { $0 == dir }
+        RelaySettings.allowedDirectories = allowedDirectories
     }
 
     // MARK: - 操作

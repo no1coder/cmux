@@ -65,6 +65,20 @@ struct RelaySettings {
         set { writeFile("paired-phone-name", content: newValue) }
     }
 
+    /// 允许手机端访问的目录列表（每行一个路径，如 ~/code）
+    static var allowedDirectories: [String] {
+        get {
+            guard let raw = readFile("allowed-directories") else {
+                // 默认目录
+                return ["~/code", "~/projects", "~/Developer", "~/Documents", "~/Desktop"]
+            }
+            return raw.components(separatedBy: "\n").filter { !$0.isEmpty }
+        }
+        set {
+            writeFile("allowed-directories", content: newValue.joined(separator: "\n"))
+        }
+    }
+
     // MARK: - Keychain（pair_secret）
 
     private static let keychainService = "com.cmux.relay.pair-secret"

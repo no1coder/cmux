@@ -407,7 +407,7 @@ struct TitlebarControlsView: View {
                 relayIconLabel(config: config)
             }
             .accessibilityIdentifier("titlebarControl.toggleRelay")
-            .background(RelayAnchorView { viewModel.relayAnchorView = $0 })
+            .background(RelayAnchorView { viewModel.relayAnchorView = $0 }.frame(width: 1, height: 1))
             .accessibilityLabel(String(localized: "titlebar.relay.accessibilityLabel", defaultValue: "Mobile Remote"))
             .accessibilityValue(relayAccessibilityStatus)
             .safeHelp(String(localized: "titlebar.relay.tooltip", defaultValue: "Mobile remote access"))

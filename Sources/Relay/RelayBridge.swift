@@ -927,6 +927,7 @@ final class RelayBridge {
         let commands = scanCapabilities()
         pushEvent("capabilities.snapshot", payload: [
             "slash_commands": commands,
+            "allowed_directories": RelaySettings.allowedDirectories,
             "version": 2,
         ])
         #if DEBUG

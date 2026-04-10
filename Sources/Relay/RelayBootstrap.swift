@@ -56,15 +56,17 @@ final class RelayBootstrap {
         let relayScreenStream = RelayScreenStream()
         let relayAgentApproval = RelayAgentApproval(bridge: relayBridge)
 
-        // 配置文件处理器（沙箱限制为用户常用工作目录）
+        // 配置文件处理器（沙箱限制由用户在 RelaySettings 中配置的目录）
         let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
-        let sandbox = RelayFileSandbox(allowedRoots: [
-            "\(homeDir)/code",
-            "\(homeDir)/projects",
-            "\(homeDir)/Developer",
-            "\(homeDir)/Documents",
-            "\(homeDir)/Desktop",
-        ])
+        let allowedDirs = RelaySettings.allowedDirectories.map { dir -> String in
+            if dir.hasPrefix("~/") {
+                return homeDir + "/" + String(dir.dropFirst(2))
+            } else if dir.hasPrefix("~") {
+                return homeDir + String(dir.dropFirst(1))
+            }
+            return dir
+        }
+        let sandbox = RelayFileSandbox(allowedRoots: allowedDirs)
         let fileHandler = RelayFileHandler(sandbox: sandbox)
         let browserHandler = RelayBrowserHandler(bridge: relayBridge)
 
