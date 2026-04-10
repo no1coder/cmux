@@ -80,6 +80,14 @@ struct RelayPopoverView: View {
 
             serverURLField
 
+            if let error = stateModel.error {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .padding(.horizontal, 16)
+                    .multilineTextAlignment(.center)
+            }
+
             Divider()
 
             Button(action: { stateModel.generateQRCode() }) {
@@ -467,7 +475,12 @@ final class RelayStateModel: ObservableObject {
     }
 
     func generateQRCode() {
-        guard let serverURL = RelaySettings.serverURL, !serverURL.isEmpty else { return }
+        guard let serverURL = RelaySettings.serverURL, !serverURL.isEmpty else {
+            error = "服务器地址未配置"
+            print("[relay] generateQRCode: serverURL 为空")
+            return
+        }
+        print("[relay] generateQRCode: serverURL=\(serverURL)")
 
         viewState = .pairing
         error = nil
@@ -495,9 +508,20 @@ final class RelayStateModel: ObservableObject {
                 guard let self else { return }
 
                 if let err {
-                    self.error = err.localizedDescription
+                    print("[relay] generateQRCode 网络错误: \(err)")
+                    self.error = "网络错误: \(err.localizedDescription)"
                     self.viewState = .unpaired
                     return
+                }
+
+                if let httpResponse = response as? HTTPURLResponse {
+                    print("[relay] generateQRCode HTTP status=\(httpResponse.statusCode)")
+                    if httpResponse.statusCode != 200 {
+                        let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? "无响应"
+                        self.error = "服务器返回 \(httpResponse.statusCode): \(body)"
+                        self.viewState = .unpaired
+                        return
+                    }
                 }
 
                 guard let data,
