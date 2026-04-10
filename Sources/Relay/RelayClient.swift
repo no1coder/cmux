@@ -115,7 +115,10 @@ final class RelayClient: NSObject {
 
         // 先释放旧 session，避免泄漏
         urlSession?.invalidateAndCancel()
-        let session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 30   // 请求超时 30 秒
+        config.timeoutIntervalForResource = 300 // 资源超时 5 分钟
+        let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
         self.urlSession = session
         let task = session.webSocketTask(with: url)
         self.webSocketTask = task
