@@ -52,6 +52,14 @@ final class RelayBridge {
     /// 保护 isModelSwitching 的队列
     private let modelSwitchQueue = DispatchQueue(label: "com.cmux.relay.modelSwitch")
 
+    // MARK: - RPC 响应去重缓存
+
+    /// RPC 响应去重缓存（request_id → 缓存结果，60 秒 TTL）
+    private var recentResponses: [String: (response: [String: Any], timestamp: Date)] = [:]
+    private let responseCacheLock = NSLock()
+    /// 请求 ID（Int）→ 手机端 request_id（UUID），供 sendRPCResponse 查找缓存键
+    private var pendingRequestUUIDs: [Int: String] = [:]
+
     // MARK: - 持久化 Socket 连接
 
     /// 复用的 Unix socket 文件描述符，避免每次 RPC 都重新建连
@@ -138,6 +146,8 @@ final class RelayBridge {
         let params = payload["params"] as? [String: Any]
         // 请求 ID（优先使用 payload 中的 id，兼容不同格式）
         let requestID = payload["id"] as? Int ?? Int(seq)
+        // 手机端生成的 UUID，用于 RPC 去重
+        let requestUUID = payload["request_id"] as? String
 
         #if DEBUG
         dlog("[relay] RPC method='\(method)' id=\(requestID) payload.keys=\(payload.keys.sorted())")
@@ -145,7 +155,21 @@ final class RelayBridge {
 
         switch msgType {
         case "rpc_request":
-            handleRPCRequest(method: method, params: params, requestID: requestID)
+            // RPC 去重检查：同一 request_id 命中时直接返回缓存响应
+            if let uuid = requestUUID, let cached = getCachedResponse(requestId: uuid) {
+                #if DEBUG
+                dlog("[relay] 去重命中: request_id=\(uuid.prefix(8))")
+                #endif
+                sendRPCResponse(requestID: requestID, result: cached)
+                return
+            }
+            // 注册 requestID → requestUUID 映射，供 sendRPCResponse 缓存响应
+            if let uuid = requestUUID {
+                responseCacheLock.lock()
+                pendingRequestUUIDs[requestID] = uuid
+                responseCacheLock.unlock()
+            }
+            handleRPCRequest(method: method, params: params, requestID: requestID, requestUUID: requestUUID)
         default:
             // 其他消息类型（resume 等由 relay 服务器处理）
             break
@@ -155,7 +179,7 @@ final class RelayBridge {
     // MARK: - RPC 请求路由
 
     /// 根据 method 路由到不同处理器
-    private func handleRPCRequest(method: String, params: [String: Any]?, requestID: Int) {
+    private func handleRPCRequest(method: String, params: [String: Any]?, requestID: Int, requestUUID: String? = nil) {
         switch method {
         // Agent 审批
         case "agent.approve", "agent.reject":
@@ -305,6 +329,33 @@ final class RelayBridge {
                 self.forwardToSocket(method: method, params: params, requestID: requestID)
             }
         }
+    }
+
+    // MARK: - RPC 去重缓存辅助方法
+
+    /// 查找缓存的 RPC 响应
+    private func getCachedResponse(requestId: String) -> [String: Any]? {
+        responseCacheLock.lock()
+        defer { responseCacheLock.unlock() }
+        guard let entry = recentResponses[requestId] else { return nil }
+        // 60 秒 TTL
+        if Date().timeIntervalSince(entry.timestamp) > 60 {
+            recentResponses.removeValue(forKey: requestId)
+            return nil
+        }
+        return entry.response
+    }
+
+    /// 缓存 RPC 响应
+    private func cacheResponse(requestId: String, response: [String: Any]) {
+        responseCacheLock.lock()
+        recentResponses[requestId] = (response, Date())
+        // 清理过期条目（超过 100 条时才触发，避免每次都遍历）
+        if recentResponses.count > 100 {
+            let cutoff = Date().addingTimeInterval(-60)
+            recentResponses = recentResponses.filter { $0.value.timestamp > cutoff }
+        }
+        responseCacheLock.unlock()
     }
 
     // MARK: - 转发到本地 Socket
@@ -603,6 +654,14 @@ final class RelayBridge {
         #if DEBUG
         dlog("[relay] sendRPCResponse id=\(requestID) keys=\(result.keys.sorted()) client=\(relayClient != nil) connected=\(relayClient?.status == .connected)")
         #endif
+        // 缓存响应用于去重（若有对应的 request_id UUID）
+        responseCacheLock.lock()
+        if let uuid = pendingRequestUUIDs.removeValue(forKey: requestID) {
+            responseCacheLock.unlock()
+            cacheResponse(requestId: uuid, response: result)
+        } else {
+            responseCacheLock.unlock()
+        }
         var responsePayload = result
         responsePayload["id"] = requestID
 
