@@ -184,6 +184,22 @@ struct RelayFileHandler {
         case "java": return "text/x-java"
         case "c", "h": return "text/x-c"
         case "cpp", "hpp", "cc": return "text/x-c++"
+        // 视频
+        case "mp4": return "video/mp4"
+        case "mov": return "video/quicktime"
+        case "avi": return "video/x-msvideo"
+        case "mkv": return "video/x-matroska"
+        case "webm": return "video/webm"
+        case "m4v": return "video/x-m4v"
+        case "flv": return "video/x-flv"
+        case "wmv": return "video/x-ms-wmv"
+        // 音频
+        case "mp3": return "audio/mpeg"
+        case "wav": return "audio/wav"
+        case "m4a": return "audio/mp4"
+        case "aac": return "audio/aac"
+        case "ogg": return "audio/ogg"
+        case "flac": return "audio/flac"
         // 二进制
         case "pdf": return "application/pdf"
         case "zip": return "application/zip"
