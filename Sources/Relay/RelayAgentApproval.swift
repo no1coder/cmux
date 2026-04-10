@@ -76,6 +76,10 @@ final class RelayAgentApproval {
         ]
         bridge.pushEvent("agent.approval_required", payload: payload)
 
+        // 同步推送 waiting_approval 阶段事件，让 iOS Live Activity 立即更新
+        bridge.lastReportedPhase = "waiting_approval"
+        bridge.pushPhaseEvent(phase: "waiting_approval", surfaceID: surfaceID, toolName: action)
+
         // 启动超时定时器（5 分钟后自动拒绝）
         DispatchQueue.global(qos: .utility).asyncAfter(
             deadline: .now() + .seconds(timeoutSeconds)

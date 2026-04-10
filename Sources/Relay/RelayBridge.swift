@@ -39,6 +39,12 @@ final class RelayBridge {
     /// 监听相关操作的串行队列
     private let watcherQueue = DispatchQueue(label: "com.cmux.relay.jsonlWatcher")
 
+    // MARK: - Claude 阶段状态
+
+    /// 上次上报的 Claude 阶段（避免重复推送）
+    /// internal：RelayAgentApproval 需要直接更新此状态
+    var lastReportedPhase: String = "idle"
+
     // MARK: - 模型切换状态
 
     /// 模型切换互斥标志，防止并发切换
@@ -194,6 +200,12 @@ final class RelayBridge {
              "pane.create", "pane.close", "pane.break", "pane.join":
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self else { return }
+                // Surface/pane 关闭时清理对应的 JSONL watcher
+                if method == "surface.close" || method == "pane.close" || method == "workspace.close" {
+                    if let surfaceID = params?["surface_id"] as? String, Self.isValidID(surfaceID) {
+                        self.stopWatchingClaude(surfaceID: surfaceID)
+                    }
+                }
                 self.forwardToSocket(method: method, params: params, requestID: requestID)
                 // 状态变更后推送更新的 surface 列表
                 DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.5) {
@@ -297,16 +309,26 @@ final class RelayBridge {
 
     // MARK: - 转发到本地 Socket
 
-    /// 内部直接调用的递增 RPC ID（从 90000 起，避免与普通 RPC id 冲突）
-    private static var nextDirectID: Int = 90000
+    /// 统一的自增 RPC ID 计数器（线程安全），所有 RPC 请求共用
+    private static var rpcIDCounter: Int = 0
+    private static let rpcIDLock = NSLock()
+
+    /// 生成线程安全的自增 RPC ID
+    static func nextRpcID() -> Int {
+        rpcIDLock.lock()
+        rpcIDCounter += 1
+        let id = rpcIDCounter
+        rpcIDLock.unlock()
+        return id
+    }
 
     /// 转发到本地 socket（不等待响应，供内部模块调用）
     func forwardToSocketDirect(method: String, params: [String: Any]) {
-        Self.nextDirectID += 1
+        let currentID = Self.nextRpcID()
         let rpcRequest: [String: Any] = [
             "jsonrpc": "2.0",
             "method": method,
-            "id": Self.nextDirectID,
+            "id": currentID,
             "params": params,
         ]
         guard let jsonData = try? JSONSerialization.data(withJSONObject: rpcRequest),
@@ -647,6 +669,30 @@ final class RelayBridge {
         relayClient?.send(data)
     }
 
+    /// 推送 Claude 阶段变化事件到 iPhone（仅在状态变化时推送）
+    /// internal：RelayAgentApproval 需要直接调用此方法
+    func pushPhaseEvent(phase: String, surfaceID: String, toolName: String? = nil, projectName: String? = nil, lastUserMessage: String? = nil, lastAssistantSummary: String? = nil) {
+        var payload: [String: Any] = [
+            "event": "phase.update",
+            "surface_id": surfaceID,
+            "phase": phase,
+        ]
+        if let toolName { payload["tool_name"] = toolName }
+        if let projectName { payload["project_name"] = projectName }
+        if let lastUserMessage { payload["last_user_message"] = String(lastUserMessage.prefix(120)) }
+        if let lastAssistantSummary { payload["last_assistant_summary"] = String(lastAssistantSummary.prefix(200)) }
+
+        // push_hint 让 relay server 知道该触发 APNs 推送
+        var pushHint: [String: String] = ["event": "phase", "phase": phase]
+        if phase == "ended" {
+            pushHint["summary"] = lastAssistantSummary.map { String($0.prefix(100)) } ?? "Claude 已完成"
+        } else if phase == "waiting_approval" {
+            pushHint["summary"] = "需要审批: \(toolName ?? "工具调用")"
+        }
+
+        pushEvent("phase.update", payload: payload, pushHint: pushHint)
+    }
+
     /// 推送所有 workspace 的 surface 列表到手机端
     func pushSurfaceList() {
         #if DEBUG
@@ -699,7 +745,7 @@ final class RelayBridge {
         var request: [String: Any] = [
             "jsonrpc": "2.0",
             "method": method,
-            "id": Int(Date().timeIntervalSince1970 * 1000) % 1_000_000,
+            "id": Self.nextRpcID(),
         ]
         if let params { request["params"] = params }
 
@@ -718,7 +764,7 @@ final class RelayBridge {
         var request: [String: Any] = [
             "jsonrpc": "2.0",
             "method": method,
-            "id": Int(Date().timeIntervalSince1970 * 1000) % 1_000_000,
+            "id": Self.nextRpcID(),
         ]
         if let params { request["params"] = params }
 
@@ -740,7 +786,7 @@ final class RelayBridge {
             let request: [String: Any] = [
                 "jsonrpc": "2.0",
                 "method": "workspace.list",
-                "id": 2,
+                "id": Self.nextRpcID(),
             ]
             guard let jsonData = try? JSONSerialization.data(withJSONObject: request),
                   let jsonString = String(data: jsonData, encoding: .utf8),
@@ -1327,15 +1373,29 @@ final class RelayBridge {
             let attrs = try? FileManager.default.attributesOfItem(atPath: jsonlPath)
             let currentSize = (attrs?[.size] as? UInt64) ?? 0
 
-            // 创建 DispatchSource 监听文件写入
+            // 创建 DispatchSource 监听文件写入、删除、重命名
             let source = DispatchSource.makeFileSystemObjectSource(
                 fileDescriptor: fd,
-                eventMask: [.write, .extend],
+                eventMask: [.write, .extend, .delete, .rename],
                 queue: self.watcherQueue
             )
 
             source.setEventHandler { [weak self] in
-                self?.handleJsonlChange(surfaceID: surfaceID, path: jsonlPath)
+                guard let self else { return }
+                let flags = source.data
+                // 文件被删除或重命名 → 停止当前 watcher，尝试重建
+                if flags.contains(.delete) || flags.contains(.rename) {
+                    #if DEBUG
+                    dlog("[relay] JSONL 文件被删除/重命名: surface \(surfaceID.prefix(8))，尝试重建 watcher")
+                    #endif
+                    self.stopWatchingClaudeSync(surfaceID: surfaceID)
+                    // 延迟重建，等文件系统稳定
+                    self.watcherQueue.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                        self?.rebuildWatcherIfNeeded(surfaceID: surfaceID)
+                    }
+                    return
+                }
+                self.handleJsonlChange(surfaceID: surfaceID, path: jsonlPath)
             }
 
             source.setCancelHandler {
@@ -1369,6 +1429,70 @@ final class RelayBridge {
         #endif
     }
 
+    /// 文件被删除/重命名后尝试重建 watcher（必须在 watcherQueue 上调用）
+    private func rebuildWatcherIfNeeded(surfaceID: String) {
+        // 确认还没被其他逻辑重建
+        guard watchedSurfaces[surfaceID] == nil else { return }
+
+        // 重新定位 JSONL 文件
+        guard let sessionId = lookupSessionId(forSurface: surfaceID),
+              Self.isValidID(sessionId) else {
+            #if DEBUG
+            dlog("[relay] rebuildWatcher: session 未找到，放弃重建 surface \(surfaceID.prefix(8))")
+            #endif
+            return
+        }
+        let cwd = getSurfaceCwd(surfaceID: surfaceID) ?? ""
+        let projectDir = claudeProjectPath(forCwd: cwd)
+        let newPath = "\(projectDir)/\(sessionId).jsonl"
+        guard FileManager.default.fileExists(atPath: newPath) else {
+            #if DEBUG
+            dlog("[relay] rebuildWatcher: JSONL 文件不存在，放弃重建 surface \(surfaceID.prefix(8))")
+            #endif
+            return
+        }
+
+        let fd = Darwin.open(newPath, O_RDONLY | O_EVTONLY)
+        guard fd >= 0 else { return }
+
+        let fileAttrs = try? FileManager.default.attributesOfItem(atPath: newPath)
+        let currentSize = (fileAttrs?[.size] as? UInt64) ?? 0
+
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask: [.write, .extend, .delete, .rename],
+            queue: watcherQueue
+        )
+
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            let flags = source.data
+            if flags.contains(.delete) || flags.contains(.rename) {
+                self.stopWatchingClaudeSync(surfaceID: surfaceID)
+                self.watcherQueue.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                    self?.rebuildWatcherIfNeeded(surfaceID: surfaceID)
+                }
+                return
+            }
+            self.handleJsonlChange(surfaceID: surfaceID, path: newPath)
+        }
+
+        source.setCancelHandler {
+            Darwin.close(fd)
+        }
+
+        jsonlWatchers[newPath] = (fd, source, currentSize)
+        watchedSurfaces[surfaceID] = newPath
+        source.resume()
+
+        // 通知手机端会话文件已变更，需重新加载
+        pushEvent("claude.session.reset", payload: ["surface_id": surfaceID])
+
+        #if DEBUG
+        dlog("[relay] rebuildWatcher: 成功重建 watcher surface \(surfaceID.prefix(8))")
+        #endif
+    }
+
     /// 停止所有监听
     func stopAllWatchers() {
         watcherQueue.async { [weak self] in
@@ -1387,6 +1511,17 @@ final class RelayBridge {
 
         let attrs = try? FileManager.default.attributesOfItem(atPath: path)
         let newSize = (attrs?[.size] as? UInt64) ?? 0
+
+        // 文件被截断（新会话覆盖）→ 重置偏移量，从头读取
+        if newSize < watcher.lastSize {
+            #if DEBUG
+            dlog("[relay] JSONL 文件被截断: \(path.components(separatedBy: "/").last ?? "?") (\(watcher.lastSize) → \(newSize))，从头读取")
+            #endif
+            watcher.lastSize = 0
+            jsonlWatchers[path] = watcher
+            // 通知手机端清空旧消息，重新加载
+            pushEvent("claude.session.reset", payload: ["surface_id": surfaceID])
+        }
 
         // 文件没有变大，跳过
         guard newSize > watcher.lastSize else { return }
@@ -1495,6 +1630,27 @@ final class RelayBridge {
                 let blocks = lastMsg["content"] as? [[String: Any]] ?? []
                 if blocks.contains(where: { ($0["type"] as? String) == "tool_result" }) { status = "thinking" }
             }
+        }
+
+        // 阶段变化时推送 phase.update 事件
+        if status != lastReportedPhase {
+            lastReportedPhase = status
+            // 提取最近的用户消息和助手回复用于推送摘要
+            let lastUser = newMessages.last(where: { ($0["type"] as? String) == "user" })
+            let lastUserText = (lastUser?["content"] as? [[String: Any]])?
+                .first(where: { ($0["type"] as? String) == "text" })?["text"] as? String
+            let lastAssistant = newMessages.last(where: { ($0["type"] as? String) == "assistant" })
+            let lastAssistantText = (lastAssistant?["content"] as? [[String: Any]])?
+                .first(where: { ($0["type"] as? String) == "text" })?["text"] as? String
+
+            pushPhaseEvent(
+                phase: status,
+                surfaceID: surfaceID,
+                toolName: nil,
+                projectName: getSurfaceCwd(surfaceID: surfaceID)?.components(separatedBy: "/").last,
+                lastUserMessage: lastUserText,
+                lastAssistantSummary: lastAssistantText
+            )
         }
 
         // 推送增量消息到手机（含增量 token 使用量）
