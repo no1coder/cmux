@@ -67,40 +67,7 @@ final class RelayBridge {
     /// 保护 persistentFd 的串行队列
     private let socketQueue = DispatchQueue(label: "com.cmux.relay.socket")
 
-    // MARK: - 能力快照：Slash 命令列表
-
-    /// Claude Code 可用 slash 命令（按类别分组）
-    /// 连接时推送到 iPhone，让命令菜单动态渲染
-    private static let slashCommands: [[String: Any]] = [
-        // 常用
-        ["command": "/compact", "description": "压缩上下文", "category": "common"],
-        ["command": "/status", "description": "查看状态", "category": "common"],
-        ["command": "/clear", "description": "清除对话", "category": "common"],
-        ["command": "/help", "description": "帮助", "category": "common"],
-        ["command": "/cost", "description": "费用统计", "category": "common"],
-        // 项目
-        ["command": "/init", "description": "初始化项目", "category": "project"],
-        ["command": "/review", "description": "代码审查", "category": "project"],
-        ["command": "/bug", "description": "报告/调试 bug", "category": "project"],
-        ["command": "/terminal-setup", "description": "终端环境配置", "category": "project"],
-        // 配置
-        ["command": "/memory", "description": "记忆管理", "category": "config"],
-        ["command": "/mcp", "description": "MCP 服务", "category": "tools"],
-        ["command": "/model", "description": "切换模型", "category": "tools", "interactive": true, "options": [
-            ["key": "default", "label": "Default (推荐)"],
-            ["key": "sonnet", "label": "Sonnet 4.6"],
-            ["key": "haiku", "label": "Haiku 4.5"],
-            ["key": "opus", "label": "Opus 4.6"],
-        ]],
-        ["command": "/doctor", "description": "诊断", "category": "tools"],
-        ["command": "/listen", "description": "监听模式", "category": "tools"],
-        // 手机上不可用的命令
-        ["command": "/config", "description": "配置", "category": "config", "disabled": true, "disabledReason": "需要 TUI 交互"],
-        ["command": "/permissions", "description": "权限管理", "category": "config", "disabled": true, "disabledReason": "需要 TUI 交互"],
-        ["command": "/vim", "description": "Vim 模式", "category": "tools", "disabled": true, "disabledReason": "需要 TUI 交互"],
-        ["command": "/allowed-tools", "description": "管理允许的工具", "category": "config", "disabled": true, "disabledReason": "需要 TUI 交互"],
-        ["command": "/install-github-app", "description": "安装 GitHub App", "category": "tools"],
-    ]
+    // MARK: - 能力快照：Slash 命令扫描
 
     // MARK: - 安全：RPC 方法白名单
 
@@ -787,13 +754,184 @@ final class RelayBridge {
         pushEvent("phase.update", payload: payload, pushHint: pushHint)
     }
 
-    /// 推送能力快照到 iPhone（可用的 slash 命令列表）
-    /// 连接建立后调用一次即可；命令列表在会话期间不会变化
+    /// 扫描 Claude Code 命令/技能目录，构建完整的可用命令列表
+    private func scanCapabilities() -> [[String: Any]] {
+        var commands: [[String: Any]] = []
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser.path
+
+        // 1. 内置命令（始终存在）
+        commands.append(contentsOf: builtinCommands())
+
+        // 2. 全局用户命令: ~/.claude/commands/*.md
+        let globalCmdsDir = "\(home)/.claude/commands"
+        commands.append(contentsOf: scanCommandDirectory(globalCmdsDir, category: "user"))
+
+        // 3. 全局用户技能: ~/.claude/skills/*/SKILL.md
+        let globalSkillsDir = "\(home)/.claude/skills"
+        commands.append(contentsOf: scanSkillsDirectory(globalSkillsDir, category: "skill"))
+
+        // 4. 插件命令和技能: ~/.claude/plugins/cache/*/*/
+        let pluginCacheDir = "\(home)/.claude/plugins/cache"
+        if let orgs = try? fm.contentsOfDirectory(atPath: pluginCacheDir) {
+            for org in orgs {
+                let orgPath = "\(pluginCacheDir)/\(org)"
+                guard let plugins = try? fm.contentsOfDirectory(atPath: orgPath) else { continue }
+                for plugin in plugins {
+                    let pluginPath = "\(orgPath)/\(plugin)"
+                    // 找最新版本目录
+                    guard let versions = try? fm.contentsOfDirectory(atPath: pluginPath) else { continue }
+                    guard let latestVersion = versions.sorted().last else { continue }
+                    let versionPath = "\(pluginPath)/\(latestVersion)"
+
+                    let prefix = "\(org):\(plugin)"
+                    // 插件命令
+                    let cmdsPath = "\(versionPath)/commands"
+                    commands.append(contentsOf: scanCommandDirectory(cmdsPath, category: "plugin", prefix: prefix))
+                    // 插件技能
+                    let skillsPath = "\(versionPath)/skills"
+                    commands.append(contentsOf: scanSkillsDirectory(skillsPath, category: "plugin", prefix: prefix))
+                }
+            }
+        }
+
+        // 5. 项目命令（遍历已知 surface 的 CWD）
+        for (surfaceID, _) in watchedSurfaces {
+            if let cwd = getSurfaceCwd(surfaceID: surfaceID) {
+                let projectCmdsDir = "\(cwd)/.claude/commands"
+                commands.append(contentsOf: scanCommandDirectory(projectCmdsDir, category: "project"))
+            }
+        }
+
+        return commands
+    }
+
+    /// 扫描命令目录（.md 文件），支持命名空间子目录
+    private func scanCommandDirectory(_ path: String, category: String, prefix: String? = nil) -> [[String: Any]] {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(atPath: path) else { return [] }
+        var commands: [[String: Any]] = []
+
+        for entry in entries {
+            let fullPath = "\(path)/\(entry)"
+            var isDir: ObjCBool = false
+            fm.fileExists(atPath: fullPath, isDirectory: &isDir)
+
+            if isDir.boolValue {
+                // 命名空间子目录: commands/ns/*.md → /ns:command
+                let nsCommands = scanCommandDirectory(fullPath, category: category, prefix: entry)
+                commands.append(contentsOf: nsCommands)
+            } else if entry.hasSuffix(".md") {
+                let name = String(entry.dropLast(3)) // 去掉 .md
+                let cmdName: String
+                if let prefix {
+                    cmdName = "/\(prefix):\(name)"
+                } else {
+                    cmdName = "/\(name)"
+                }
+                let description = extractFrontmatterDescription(fullPath)
+                commands.append([
+                    "command": cmdName,
+                    "description": description ?? name,
+                    "category": category,
+                ])
+            }
+        }
+        return commands
+    }
+
+    /// 扫描技能目录（子目录下的 SKILL.md 或 skill.md）
+    private func scanSkillsDirectory(_ path: String, category: String, prefix: String? = nil) -> [[String: Any]] {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(atPath: path) else { return [] }
+        var commands: [[String: Any]] = []
+
+        for entry in entries {
+            let skillMdPath = "\(path)/\(entry)/SKILL.md"
+            let skillMdPathLower = "\(path)/\(entry)/skill.md"
+            let actualPath = fm.fileExists(atPath: skillMdPath) ? skillMdPath :
+                             fm.fileExists(atPath: skillMdPathLower) ? skillMdPathLower : nil
+            guard let mdPath = actualPath else { continue }
+
+            let name: String
+            if let prefix {
+                name = "\(prefix):\(entry)"
+            } else {
+                name = entry
+            }
+            let description = extractFrontmatterDescription(mdPath)
+            commands.append([
+                "command": "/\(name)",
+                "description": description ?? entry,
+                "category": category,
+            ])
+        }
+        return commands
+    }
+
+    /// 从 Markdown 文件头部提取 YAML frontmatter 的 description 字段
+    private func extractFrontmatterDescription(_ filePath: String) -> String? {
+        guard let data = FileManager.default.contents(atPath: filePath),
+              let content = String(data: data, encoding: .utf8) else { return nil }
+
+        let lines = content.components(separatedBy: "\n")
+        guard lines.first?.trimmingCharacters(in: .whitespaces) == "---" else { return nil }
+
+        for i in 1..<lines.count {
+            let line = lines[i].trimmingCharacters(in: .whitespaces)
+            if line == "---" { break }
+            if line.hasPrefix("description:") {
+                let value = String(line.dropFirst("description:".count)).trimmingCharacters(in: .whitespaces)
+                // 去掉引号
+                if value.hasPrefix("\"") && value.hasSuffix("\"") {
+                    return String(value.dropFirst().dropLast())
+                }
+                return value.isEmpty ? nil : value
+            }
+        }
+        return nil
+    }
+
+    /// 内置 Claude Code 系统命令（固定列表，始终推送）
+    private func builtinCommands() -> [[String: Any]] {
+        return [
+            ["command": "/compact", "description": "压缩上下文", "category": "common"],
+            ["command": "/status", "description": "查看状态", "category": "common"],
+            ["command": "/clear", "description": "清除对话", "category": "common"],
+            ["command": "/help", "description": "帮助", "category": "common"],
+            ["command": "/cost", "description": "费用统计", "category": "common"],
+            ["command": "/init", "description": "初始化项目", "category": "project"],
+            ["command": "/review", "description": "代码审查", "category": "project"],
+            ["command": "/bug", "description": "报告/调试 bug", "category": "project"],
+            ["command": "/memory", "description": "记忆管理", "category": "config"],
+            ["command": "/mcp", "description": "MCP 服务", "category": "tools"],
+            ["command": "/model", "description": "切换模型", "category": "tools", "interactive": true, "options": [
+                ["key": "default", "label": "Default (推荐)"],
+                ["key": "sonnet", "label": "Sonnet 4.6"],
+                ["key": "haiku", "label": "Haiku 4.5"],
+                ["key": "opus", "label": "Opus 4.6"],
+            ]],
+            ["command": "/doctor", "description": "诊断", "category": "tools"],
+            ["command": "/listen", "description": "监听模式", "category": "tools"],
+            // 手机上不可用的命令
+            ["command": "/config", "description": "配置", "category": "config", "disabled": true, "disabledReason": "需要 TUI 交互"],
+            ["command": "/permissions", "description": "权限管理", "category": "config", "disabled": true, "disabledReason": "需要 TUI 交互"],
+            ["command": "/vim", "description": "Vim 模式", "category": "tools", "disabled": true, "disabledReason": "需要 TUI 交互"],
+            ["command": "/allowed-tools", "description": "管理允许的工具", "category": "config", "disabled": true, "disabledReason": "需要 TUI 交互"],
+            ["command": "/install-github-app", "description": "安装 GitHub App", "category": "tools"],
+        ]
+    }
+
+    /// 推送能力快照到 iPhone（动态扫描后的 slash 命令列表）
     func pushCapabilities() {
+        let commands = scanCapabilities()
         pushEvent("capabilities.snapshot", payload: [
-            "slash_commands": Self.slashCommands,
-            "version": 1,
+            "slash_commands": commands,
+            "version": 2,
         ])
+        #if DEBUG
+        dlog("[relay] 推送 \(commands.count) 个命令/技能")
+        #endif
     }
 
     /// 推送所有 workspace 的 surface 列表到手机端
