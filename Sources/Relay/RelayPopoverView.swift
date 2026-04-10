@@ -669,7 +669,12 @@ final class RelayStateModel: ObservableObject {
                 let phoneName = (json["phone_name"] as? String) ?? ""
 
                 // 保存配对信息
-                try? RelaySettings.savePairSecret(pairSecret, forPhone: phoneID)
+                do {
+                    try RelaySettings.savePairSecret(pairSecret, forPhone: phoneID)
+                    print("[relay] pair_secret 保存成功 phone=\(phoneID.prefix(10))")
+                } catch {
+                    print("[relay] pair_secret 保存失败: \(error)")
+                }
                 RelaySettings.pairedPhoneID = phoneID
                 RelaySettings.pairedPhoneName = phoneName
 
@@ -686,7 +691,9 @@ final class RelayStateModel: ObservableObject {
                         self.viewState = .paired
                     }
 
-                    // 启动 Relay 连接
+                    // 配对成功后自动启用并连接
+                    RelaySettings.isEnabled = true
+                    self.isEnabled = true
                     let socketPath = RelayBootstrap.shared.bridge?.socketPath
                         ?? SocketControlSettings.socketPath()
                     RelayBootstrap.shared.start(socketPath: socketPath)

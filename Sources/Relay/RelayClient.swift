@@ -108,6 +108,7 @@ final class RelayClient: NSObject {
         // 构造 WebSocket URL（支持 ws:// 和 wss://）
         let scheme = serverURL.hasPrefix("localhost") || serverURL.hasPrefix("127.0.0.1") ? "ws" : "wss"
         let urlString = "\(scheme)://\(serverURL)/ws/device/\(deviceID)"
+        print("[relay] WebSocket 连接: \(urlString)")
         guard let url = URL(string: urlString) else {
             scheduleReconnect()
             return

@@ -22,31 +22,23 @@ final class RelayBootstrap {
     func start(socketPath: String) {
         lastSocketPath = socketPath
 
-        #if DEBUG
-        dlog("[relay] start() 被调用，socketPath=\(socketPath)")
-        dlog("[relay] isEnabled=\(RelaySettings.isEnabled) serverURL=\(RelaySettings.serverURL ?? "nil") phoneID=\(RelaySettings.pairedPhoneID ?? "nil")")
-        #endif
+        let hasSecret = RelaySettings.pairedPhoneID.flatMap { RelaySettings.loadPairSecret(forPhone: $0) } != nil
+        print("[relay] start() isEnabled=\(RelaySettings.isEnabled) serverURL=\(RelaySettings.serverURL ?? "nil") phoneID=\(RelaySettings.pairedPhoneID ?? "nil") hasSecret=\(hasSecret)")
 
         guard RelaySettings.isEnabled else {
-            #if DEBUG
-            dlog("[relay] 远程访问未启用，跳过")
-            #endif
+            print("[relay] 远程访问未启用，跳过")
             return
         }
 
         guard let serverURL = RelaySettings.serverURL, !serverURL.isEmpty else {
-            #if DEBUG
-            dlog("[relay] 未配置中继服务器地址，跳过")
-            #endif
+            print("[relay] 未配置中继服务器地址，跳过")
             return
         }
 
         guard let phoneID = RelaySettings.pairedPhoneID,
               let pairSecret = RelaySettings.loadPairSecret(forPhone: phoneID)
         else {
-            #if DEBUG
-            dlog("[relay] 未配对，跳过连接（等待配对后手动调用 start）")
-            #endif
+            print("[relay] 未配对或 secret 丢失，跳过连接")
             return
         }
 
