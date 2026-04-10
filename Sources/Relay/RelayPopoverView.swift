@@ -364,9 +364,10 @@ final class RelayStateModel: ObservableObject {
         isEnabled = RelaySettings.isEnabled
 
         if serverURLInput.isEmpty && RelaySettings.serverURL == nil {
-            // 首次使用，填入默认地址但不自动保存，等用户确认
+            // 首次使用，自动保存默认地址，直接进入未配对状态
             serverURLInput = Self.defaultServerURL
-            viewState = .unconfigured
+            RelaySettings.serverURL = Self.defaultServerURL
+            viewState = .unpaired
         } else if serverURLInput.isEmpty {
             viewState = .unconfigured
         } else if RelaySettings.pairedPhoneID == nil {
