@@ -368,15 +368,19 @@ final class RelayStateModel: ObservableObject {
 
     // 从 RelaySettings 刷新状态
     func refresh() {
-        serverURLInput = RelaySettings.serverURL ?? Self.defaultServerURL
         isEnabled = RelaySettings.isEnabled
 
-        if serverURLInput.isEmpty && RelaySettings.serverURL == nil {
+        if RelaySettings.serverURL == nil {
             // 首次使用，自动保存默认地址，直接进入未配对状态
             serverURLInput = Self.defaultServerURL
             RelaySettings.serverURL = Self.defaultServerURL
             viewState = .unpaired
-        } else if serverURLInput.isEmpty {
+            return
+        }
+
+        serverURLInput = RelaySettings.serverURL ?? Self.defaultServerURL
+
+        if serverURLInput.isEmpty {
             viewState = .unconfigured
         } else if RelaySettings.pairedPhoneID == nil {
             viewState = .unpaired
