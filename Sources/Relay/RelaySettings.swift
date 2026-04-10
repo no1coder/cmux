@@ -19,9 +19,17 @@ struct RelaySettings {
 
     // MARK: - 普通设置（文件持久化）
 
-    /// 中继服务器地址（如 "wss://relay.example.com"）
+    /// 中继服务器地址（如 "devpod.rooyun.com"）
     static var serverURL: String? {
-        get { readFile("server-url") }
+        get {
+            guard let url = readFile("server-url") else { return nil }
+            // 域名迁移：cmux.rooyun.com → devpod.rooyun.com
+            if url == "cmux.rooyun.com" {
+                writeFile("server-url", content: "devpod.rooyun.com")
+                return "devpod.rooyun.com"
+            }
+            return url
+        }
         set { writeFile("server-url", content: newValue) }
     }
 
