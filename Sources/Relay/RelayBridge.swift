@@ -191,7 +191,7 @@ final class RelayBridge {
             sendRPCResponse(requestID: requestID, result: ["ok": true])
 
         // 文件操作
-        case "file.list", "file.read":
+        case "file.list", "file.read", "file.mkdir":
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self else { return }
                 let result = self.handleLocalMethod(method: method, params: params)
@@ -1071,6 +1071,23 @@ final class RelayBridge {
             }
             do {
                 return try handler.readFile(path: path)
+            } catch let error as FileSandboxError {
+                return ["error": sandboxErrorMessage(error)]
+            } catch {
+                return ["error": error.localizedDescription]
+            }
+
+        case "file.mkdir":
+            guard let path = params?["path"] as? String else {
+                return ["error": "缺少 path 参数"]
+            }
+            let expandedPath = (path as NSString).expandingTildeInPath
+            do {
+                // 验证父目录在沙箱内
+                let parentDir = (expandedPath as NSString).deletingLastPathComponent
+                _ = try fileHandler?.sandbox.validate(path: parentDir)
+                try FileManager.default.createDirectory(atPath: expandedPath, withIntermediateDirectories: true)
+                return ["ok": true]
             } catch let error as FileSandboxError {
                 return ["error": sandboxErrorMessage(error)]
             } catch {
