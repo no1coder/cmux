@@ -49,7 +49,9 @@ struct RelayFileHandler {
     /// - Returns: 包含 entries 数组的字典
     /// - Throws: `FileSandboxError` 或文件系统错误
     func listDirectory(path: String) throws -> [String: Any] {
-        let validatedPath = try sandbox.validate(path: path)
+        // 展开 ~ 为用户 home 目录
+        let expandedPath = (path as NSString).expandingTildeInPath
+        let validatedPath = try sandbox.validate(path: expandedPath)
 
         var isDirectory: ObjCBool = false
         FileManager.default.fileExists(atPath: validatedPath, isDirectory: &isDirectory)
@@ -101,7 +103,8 @@ struct RelayFileHandler {
     /// - Returns: 包含文件内容的字典；图片返回 base64，文本返回 utf8 字符串，二进制返回 base64
     /// - Throws: `FileSandboxError` 或文件系统错误
     func readFile(path: String) throws -> [String: Any] {
-        let validatedPath = try sandbox.validate(path: path)
+        let expandedPath = (path as NSString).expandingTildeInPath
+        let validatedPath = try sandbox.validate(path: expandedPath)
 
         // 检查文件大小限制
         let attributes = (try? FileManager.default.attributesOfItem(atPath: validatedPath)) ?? [:]
