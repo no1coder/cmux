@@ -623,7 +623,7 @@ struct HiddenTitlebarSidebarControlsView: View {
     @ObservedObject var notificationStore: TerminalNotificationStore
     @StateObject private var viewModel = TitlebarControlsViewModel()
 
-    private let hostWidth: CGFloat = 124
+    private let hostWidth: CGFloat = 160
     private let hostHeight: CGFloat = 28
 
     var body: some View {

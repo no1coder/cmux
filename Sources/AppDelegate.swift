@@ -10182,7 +10182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let bounds = contentView.bounds
         // Fallback 锚点：relay 按钮大致在通知按钮右侧，距窗口右边缘约 80pt
         // 仅在 RelayAnchorView 尚未完成布局时使用
-        let fallbackRelayButtonOffset: CGFloat = 80
+        let fallbackRelayButtonOffset: CGFloat = 50
         let anchorRect = NSRect(x: bounds.maxX - fallbackRelayButtonOffset, y: bounds.maxY - 8, width: 1, height: 1)
         relayPopover.animates = animated
         relayPopover.show(relativeTo: anchorRect, of: contentView, preferredEdge: .maxY)
