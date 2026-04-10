@@ -84,6 +84,8 @@ final class RelayClient: NSObject {
         stopHeartbeat()
         webSocketTask?.cancel(with: .normalClosure, reason: nil)
         webSocketTask = nil
+        urlSession?.invalidateAndCancel()
+        urlSession = nil
         updateStatus(.disconnected)
     }
 

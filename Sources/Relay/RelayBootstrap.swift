@@ -42,6 +42,10 @@ final class RelayBootstrap {
             return
         }
 
+        // 停掉旧连接（防止 URLSession 回调访问已释放对象）
+        client?.stop()
+        client = nil
+
         // 初始化各模块
         let relayClient = RelayClient(serverURL: serverURL, deviceID: RelaySettings.deviceID, pairSecret: pairSecret)
         let relayBridge = RelayBridge(socketPath: socketPath)
