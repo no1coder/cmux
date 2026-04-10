@@ -12,9 +12,12 @@ final class CmuxDirectoryTrust {
     private var trustedPaths: Set<String>
 
     private init() {
-        let appSupport = FileManager.default.urls(
+        guard let appSupportBase = FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask
-        ).first!.appendingPathComponent("cmux")
+        ).first else {
+            fatalError("Application Support directory unavailable")
+        }
+        let appSupport = appSupportBase.appendingPathComponent("cmux")
         storePath = appSupport.appendingPathComponent("trusted-directories.json").path
 
         let fm = FileManager.default

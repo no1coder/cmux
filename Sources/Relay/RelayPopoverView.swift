@@ -311,7 +311,7 @@ final class RelayStateModel: ObservableObject {
     }
 
     /// 默认中继服务器地址
-    static let defaultServerURL = "cmux.rooyun.com"
+    static let defaultServerURL = "devpod.rooyun.com"
 
     // 从 RelaySettings 刷新状态
     func refresh() {
@@ -356,7 +356,9 @@ final class RelayStateModel: ObservableObject {
         switch RelayBootstrap.shared.client?.status {
         case .connected: return .green
         case .connecting: return .yellow
-        default: return .red
+        default:
+            if RelaySettings.pairedPhoneID != nil { return .orange }
+            return .gray
         }
     }
 
@@ -371,8 +373,8 @@ final class RelayStateModel: ObservableObject {
 
         if RelaySettings.pairedPhoneID != nil {
             viewState = .paired
-            // Issue 2: 先保存 socketPath，再 stop，再用保存的值 start
-            let socketPath = RelayBootstrap.shared.bridge?.socketPath
+            // 先保存 socketPath，再 stop，再用保存的值 start
+            let socketPath = RelayBootstrap.shared.bridge?.socketPath ?? RelayBootstrap.shared.lastSocketPath
             RelayBootstrap.shared.stop()
             if let socketPath {
                 RelayBootstrap.shared.start(socketPath: socketPath)
@@ -386,10 +388,14 @@ final class RelayStateModel: ObservableObject {
         RelaySettings.isEnabled = enabled
         isEnabled = enabled
         if enabled {
-            // Issue 2: 先保存 socketPath（stop 会清空 bridge）
-            let socketPath = RelayBootstrap.shared.bridge?.socketPath
+            // 优先使用当前 bridge 的 socketPath，其次回退到上次保存的值
+            let socketPath = RelayBootstrap.shared.bridge?.socketPath ?? RelayBootstrap.shared.lastSocketPath
             if let socketPath {
                 RelayBootstrap.shared.start(socketPath: socketPath)
+            } else {
+                error = String(localized: "relay.error.noSocketPath", defaultValue: "Cannot re-enable: local socket path not found. Please restart the app.")
+                RelaySettings.isEnabled = false
+                isEnabled = false
             }
         } else {
             RelayBootstrap.shared.stop()

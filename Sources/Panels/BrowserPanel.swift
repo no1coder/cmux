@@ -2185,7 +2185,9 @@ final class BrowserPanel: Panel, ObservableObject {
         didSet {
             if let searchState {
                 preferredFocusIntent = .findField
+                #if DEBUG
                 NSLog("Find: browser search state created panel=%@", id.uuidString)
+                #endif
                 searchNeedleCancellable = searchState.$needle
                     .removeDuplicates()
                     .map { needle -> AnyPublisher<String, Never> in
@@ -2199,7 +2201,9 @@ final class BrowserPanel: Panel, ObservableObject {
                     .switchToLatest()
                     .sink { [weak self] needle in
                         guard let self else { return }
+                        #if DEBUG
                         NSLog("Find: browser needle updated panel=%@ needle=%@", self.id.uuidString, needle)
+                        #endif
                         self.executeFindSearch(needle)
                     }
             } else if oldValue != nil {
@@ -2208,7 +2212,9 @@ final class BrowserPanel: Panel, ObservableObject {
                     preferredFocusIntent = .webView
                 }
                 invalidateSearchFocusRequests(reason: "searchStateCleared")
+                #if DEBUG
                 NSLog("Find: browser search state cleared panel=%@", id.uuidString)
+                #endif
                 executeFindClear()
             }
         }
@@ -4852,7 +4858,9 @@ extension BrowserPanel {
         let config = WKSnapshotConfiguration()
         webView.takeSnapshot(with: config) { image, error in
             if let error = error {
+                #if DEBUG
                 NSLog("BrowserPanel snapshot error: %@", error.localizedDescription)
+                #endif
                 completion(nil)
                 return
             }
@@ -4967,7 +4975,9 @@ extension BrowserPanel {
                 let result = try await self.webView.evaluateJavaScript(js)
                 self.parseFindResult(result)
             } catch {
+                #if DEBUG
                 NSLog("Find: browser JS search error: %@", error.localizedDescription)
+                #endif
             }
         }
     }
@@ -4978,7 +4988,9 @@ extension BrowserPanel {
             do {
                 _ = try await self.webView.evaluateJavaScript(BrowserFindJavaScript.clearScript())
             } catch {
+                #if DEBUG
                 NSLog("Find: browser JS clear error: %@", error.localizedDescription)
+                #endif
             }
         }
     }
@@ -5819,7 +5831,9 @@ class BrowserDownloadDelegate: NSObject, WKDownloadDelegate {
         #if DEBUG
         dlog("download.decideDestination file=\(safeFilename)")
         #endif
+        #if DEBUG
         NSLog("BrowserPanel download: temp path=%@", destURL.path)
+        #endif
         completionHandler(destURL)
     }
 
@@ -5833,7 +5847,9 @@ class BrowserDownloadDelegate: NSObject, WKDownloadDelegate {
         #if DEBUG
         dlog("download.finished file=\(info.suggestedFilename)")
         #endif
+        #if DEBUG
         NSLog("BrowserPanel download finished: %@", info.suggestedFilename)
+        #endif
 
         // Show NSSavePanel on the next runloop iteration (safe context).
         DispatchQueue.main.async {
@@ -5851,9 +5867,13 @@ class BrowserDownloadDelegate: NSObject, WKDownloadDelegate {
                 do {
                     try? FileManager.default.removeItem(at: destURL)
                     try FileManager.default.moveItem(at: info.tempURL, to: destURL)
+                    #if DEBUG
                     NSLog("BrowserPanel download saved: %@", destURL.path)
+                    #endif
                 } catch {
+                    #if DEBUG
                     NSLog("BrowserPanel download move failed: %@", error.localizedDescription)
+                    #endif
                     try? FileManager.default.removeItem(at: info.tempURL)
                 }
             }
@@ -5870,7 +5890,9 @@ class BrowserDownloadDelegate: NSObject, WKDownloadDelegate {
         #if DEBUG
         dlog("download.failed error=\(error.localizedDescription)")
         #endif
+        #if DEBUG
         NSLog("BrowserPanel download failed: %@", error.localizedDescription)
+        #endif
     }
 }
 
@@ -5958,7 +5980,9 @@ private class BrowserNavigationDelegate: NSObject, WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        #if DEBUG
         NSLog("BrowserPanel navigation failed: %@", error.localizedDescription)
+        #endif
         // Treat committed-navigation failures the same as provisional ones so
         // stale favicon/title state from the prior page gets cleared.
         let failedURL = webView.url?.absoluteString ?? ""
@@ -5967,7 +5991,9 @@ private class BrowserNavigationDelegate: NSObject, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         let nsError = error as NSError
+        #if DEBUG
         NSLog("BrowserPanel provisional navigation failed: %@", error.localizedDescription)
+        #endif
 
         // Cancelled navigations (e.g. rapid typing) are not real errors.
         if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled {
@@ -6153,7 +6179,9 @@ private class BrowserNavigationDelegate: NSObject, WKNavigationDelegate {
            browserShouldOpenURLExternally(url) {
             let opened = NSWorkspace.shared.open(url)
             if !opened {
+                #if DEBUG
                 NSLog("BrowserPanel external navigation failed to open URL: %@", url.absoluteString)
+                #endif
             }
             #if DEBUG
             dlog("browser.navigation.external source=navDelegate opened=\(opened ? 1 : 0) url=\(url.absoluteString)")
@@ -6217,9 +6245,11 @@ private class BrowserNavigationDelegate: NSObject, WKNavigationDelegate {
             return
         }
 
+        #if DEBUG
         NSLog("BrowserPanel navigationResponse: url=%@ mime=%@ canShow=%d isMainFrame=%d",
               responseURL, mime, canShow ? 1 : 0,
               navigationResponse.isForMainFrame ? 1 : 0)
+        #endif
 
         // Check if this response should be treated as a download.
         // Criteria: explicit Content-Disposition: attachment, or a MIME type
@@ -6227,7 +6257,9 @@ private class BrowserNavigationDelegate: NSObject, WKNavigationDelegate {
         if let response = navigationResponse.response as? HTTPURLResponse {
             let contentDisposition = response.value(forHTTPHeaderField: "Content-Disposition") ?? ""
             if contentDisposition.lowercased().hasPrefix("attachment") {
+                #if DEBUG
                 NSLog("BrowserPanel download: content-disposition=attachment mime=%@ url=%@", mime, responseURL)
+                #endif
                 #if DEBUG
                 dlog("download.policy=download reason=content-disposition mime=\(mime)")
                 #endif
@@ -6237,7 +6269,9 @@ private class BrowserNavigationDelegate: NSObject, WKNavigationDelegate {
         }
 
         if !canShow {
+            #if DEBUG
             NSLog("BrowserPanel download: cannotShowMIME mime=%@ url=%@", mime, responseURL)
+            #endif
             #if DEBUG
             dlog("download.policy=download reason=cannotShowMIME mime=\(mime)")
             #endif
@@ -6252,7 +6286,9 @@ private class BrowserNavigationDelegate: NSObject, WKNavigationDelegate {
         #if DEBUG
         dlog("download.didBecome source=navigationAction")
         #endif
+        #if DEBUG
         NSLog("BrowserPanel download didBecome from navigationAction")
+        #endif
         download.delegate = downloadDelegate
     }
 
@@ -6260,7 +6296,9 @@ private class BrowserNavigationDelegate: NSObject, WKNavigationDelegate {
         #if DEBUG
         dlog("download.didBecome source=navigationResponse")
         #endif
+        #if DEBUG
         NSLog("BrowserPanel download didBecome from navigationResponse")
+        #endif
         download.delegate = downloadDelegate
     }
 }
@@ -6317,7 +6355,9 @@ private class BrowserUIDelegate: NSObject, WKUIDelegate {
            browserShouldOpenURLExternally(url) {
             let opened = NSWorkspace.shared.open(url)
             if !opened {
+                #if DEBUG
                 NSLog("BrowserPanel external navigation failed to open URL: %@", url.absoluteString)
+                #endif
             }
             #if DEBUG
             dlog("browser.navigation.external source=uiDelegate opened=\(opened ? 1 : 0) url=\(url.absoluteString)")

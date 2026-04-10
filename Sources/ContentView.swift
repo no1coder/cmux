@@ -2721,6 +2721,12 @@ struct ContentView: View {
                     anchorView: fullscreenControlsViewModel.notificationsAnchorView
                 )
             },
+            onToggleRelay: { [fullscreenControlsViewModel] in
+                AppDelegate.shared?.toggleRelayPopover(
+                    animated: true,
+                    anchorView: fullscreenControlsViewModel.relayAnchorView
+                )
+            },
             onNewTab: { tabManager.addTab() },
             visibilityMode: .alwaysVisible
         )

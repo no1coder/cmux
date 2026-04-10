@@ -2946,6 +2946,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         isTerminatingApp = true
         _ = saveSessionSnapshot(includeScrollback: true, removeWhenEmpty: false)
         stopSessionAutosaveTimer()
+        RelayBootstrap.shared.stop()
         TerminalController.shared.stop()
         VSCodeServeWebController.shared.stop()
         BrowserProfileStore.shared.flushPendingSaves()
@@ -10131,6 +10132,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func toggleNotificationsPopover(animated: Bool = true, anchorView: NSView? = nil) {
         titlebarAccessoryController.toggleNotificationsPopover(animated: animated, anchorView: anchorView)
+    }
+
+    // MARK: - Relay Popover
+
+    private lazy var relayPopover: NSPopover = {
+        let popover = NSPopover()
+        popover.behavior = .semitransient
+        popover.animates = true
+        return popover
+    }()
+
+    private lazy var relayStateModel = RelayStateModel()
+
+    func toggleRelayPopover(animated: Bool = true, anchorView: NSView? = nil) {
+        if relayPopover.isShown {
+            relayPopover.performClose(nil)
+            return
+        }
+
+        relayStateModel.refresh()
+        let hostingController = NSHostingController(
+            rootView: RelayPopoverView(
+                stateModel: relayStateModel,
+                onDismiss: { [weak relayPopover] in
+                    relayPopover?.performClose(nil)
+                }
+            )
+        )
+        hostingController.view.wantsLayer = true
+        hostingController.view.layer?.backgroundColor = .clear
+        relayPopover.contentViewController = hostingController
+
+        guard let window = anchorView?.window ?? NSApp.keyWindow,
+              let contentView = window.contentView else { return }
+
+        contentView.layoutSubtreeIfNeeded()
+
+        if let anchorView, anchorView.window != nil {
+            anchorView.superview?.layoutSubtreeIfNeeded()
+            let anchorRect = anchorView.convert(anchorView.bounds, to: contentView)
+            if !anchorRect.isEmpty {
+                relayPopover.animates = animated
+                relayPopover.show(relativeTo: anchorRect, of: contentView, preferredEdge: .maxY)
+                return
+            }
+        }
+
+        let bounds = contentView.bounds
+        // Fallback 锚点：relay 按钮大致在通知按钮右侧，距窗口右边缘约 80pt
+        // 仅在 RelayAnchorView 尚未完成布局时使用
+        let fallbackRelayButtonOffset: CGFloat = 80
+        let anchorRect = NSRect(x: bounds.maxX - fallbackRelayButtonOffset, y: bounds.maxY - 8, width: 1, height: 1)
+        relayPopover.animates = animated
+        relayPopover.show(relativeTo: anchorRect, of: contentView, preferredEdge: .maxY)
     }
 
     @discardableResult

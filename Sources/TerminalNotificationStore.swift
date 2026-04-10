@@ -733,6 +733,16 @@ final class TerminalNotificationStore: ObservableObject {
         notification in
         store.playSuppressedNotificationFeedback(for: notification)
     }
+    /// 通知转发到手机端的回调
+    /// - 仅允许 RelayBootstrap 通过 setRelayForwardHandler 注入和清除
+    /// - 在主线程上读写以保证线程安全
+    private(set) var relayForwardHandler: ((TerminalNotification) -> Void)?
+
+    /// 设置或清除通知转发回调（仅供 RelayBootstrap 调用）
+    func setRelayForwardHandler(_ handler: ((TerminalNotification) -> Void)?) {
+        assert(Thread.isMainThread, "relayForwardHandler 必须在主线程设置")
+        relayForwardHandler = handler
+    }
     private var lastNotificationDateByCooldownKey: [String: Date] = [:]
     private var indexes = NotificationIndexes()
 
@@ -969,6 +979,8 @@ final class TerminalNotificationStore: ObservableObject {
             suppressedNotificationFeedbackHandler(self, notification)
         } else {
             notificationDeliveryHandler(self, notification)
+            // 用户不在看该终端，转发通知到手机
+            relayForwardHandler?(notification)
         }
     }
 

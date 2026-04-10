@@ -129,7 +129,15 @@ enum SocketControlPasswordStore {
         ), !expected.isEmpty else {
             return false
         }
-        return expected == candidate
+        // 恒定时间比较，防止计时边信道攻击
+        let expectedBytes = Array(expected.utf8)
+        let candidateBytes = Array(candidate.utf8)
+        guard expectedBytes.count == candidateBytes.count else { return false }
+        var result: UInt8 = 0
+        for i in 0..<expectedBytes.count {
+            result |= expectedBytes[i] ^ candidateBytes[i]
+        }
+        return result == 0
     }
 
     static func migrateLegacyKeychainPasswordIfNeeded(

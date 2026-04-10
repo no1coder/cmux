@@ -850,7 +850,10 @@ struct cmuxApp: App {
                 socketPath: SocketControlSettings.socketPath(),
                 accessMode: mode
             )
+            // 启动 Relay 远程访问模块
+            RelayBootstrap.shared.start(socketPath: SocketControlSettings.socketPath())
         } else {
+            RelayBootstrap.shared.stop()
             TerminalController.shared.stop()
         }
     }

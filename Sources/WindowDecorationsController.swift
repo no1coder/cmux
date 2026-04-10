@@ -5,6 +5,10 @@ final class WindowDecorationsController {
     private var didStart = false
     private var trafficLightBaseFrames: [ObjectIdentifier: [NSWindow.ButtonType: NSRect]] = [:]
 
+    deinit {
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+    }
+
     func start() {
         guard !didStart else { return }
         didStart = true

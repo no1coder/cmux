@@ -27,6 +27,7 @@
 		8C962D1B2F8544D200CB2392 /* RelayBrowserHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C962D0E2F8544D200CB2392 /* RelayBrowserHandler.swift */; };
 		8C962D1C2F8544D200CB2392 /* RelaySettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C962D142F8544D200CB2392 /* RelaySettings.swift */; };
 		8C962D1D2F8544D200CB2392 /* RelayAgentApproval.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C962D0B2F8544D200CB2392 /* RelayAgentApproval.swift */; };
+		E715074C37844C49ACB0BABC /* RelayComposedMessageHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74D22B01D7D24A8FA25B6FBE /* RelayComposedMessageHandler.swift */; };
 		8C962D1E2F8544D200CB2392 /* RelayBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C962D0D2F8544D200CB2392 /* RelayBridge.swift */; };
 		263D8BA14A77EA5157C2C452 /* RelayE2ECrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C7D72C9917A2956651B8E4C /* RelayE2ECrypto.swift */; };
 		8C962D1F2F8544D200CB2392 /* RelayFileSandbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C962D112F8544D200CB2392 /* RelayFileSandbox.swift */; };
@@ -230,6 +231,7 @@
 		818DBCD4AB69EB72573E8138 /* SidebarResizeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarResizeUITests.swift; sourceTree = "<group>"; };
 		8C962D0B2F8544D200CB2392 /* RelayAgentApproval.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayAgentApproval.swift; sourceTree = "<group>"; };
 		8C962D0C2F8544D200CB2392 /* RelayBootstrap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayBootstrap.swift; sourceTree = "<group>"; };
+		74D22B01D7D24A8FA25B6FBE /* RelayComposedMessageHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayComposedMessageHandler.swift; sourceTree = "<group>"; };
 		8C962D0D2F8544D200CB2392 /* RelayBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayBridge.swift; sourceTree = "<group>"; };
 		9C7D72C9917A2956651B8E4C /* RelayE2ECrypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayE2ECrypto.swift; sourceTree = "<group>"; };
 		8C962D0E2F8544D200CB2392 /* RelayBrowserHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayBrowserHandler.swift; sourceTree = "<group>"; };
@@ -454,6 +456,7 @@
 				8C962D0B2F8544D200CB2392 /* RelayAgentApproval.swift */,
 				8C962D0C2F8544D200CB2392 /* RelayBootstrap.swift */,
 				8C962D0D2F8544D200CB2392 /* RelayBridge.swift */,
+				74D22B01D7D24A8FA25B6FBE /* RelayComposedMessageHandler.swift */,
 				8C962D0E2F8544D200CB2392 /* RelayBrowserHandler.swift */,
 				9C7D72C9917A2956651B8E4C /* RelayE2ECrypto.swift */,
 				8C962D0F2F8544D200CB2392 /* RelayClient.swift */,
@@ -878,6 +881,7 @@
 				8C962D1C2F8544D200CB2392 /* RelaySettings.swift in Sources */,
 				8C962D1D2F8544D200CB2392 /* RelayAgentApproval.swift in Sources */,
 				8C962D1E2F8544D200CB2392 /* RelayBridge.swift in Sources */,
+				E715074C37844C49ACB0BABC /* RelayComposedMessageHandler.swift in Sources */,
 				263D8BA14A77EA5157C2C452 /* RelayE2ECrypto.swift in Sources */,
 				8C962D1F2F8544D200CB2392 /* RelayFileSandbox.swift in Sources */,
 				A5001404 /* Panels/BrowserPanelView.swift in Sources */,

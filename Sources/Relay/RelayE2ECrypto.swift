@@ -1,3 +1,4 @@
+import Bonsplit
 import CryptoKit
 import Foundation
 
@@ -41,6 +42,20 @@ final class RelayE2ECrypto {
 
     /// 解密 e2e payload，返回原始 payload 字典
     func decrypt(_ e2ePayload: [String: Any]) -> [String: Any]? {
+        // 校验加密版本号，防止未来版本不兼容时静默解密错误数据
+        guard let version = e2ePayload["v"] as? Int else {
+            #if DEBUG
+            dlog("[relay][crypto] 解密失败：缺少版本号字段")
+            #endif
+            return nil
+        }
+        guard version == 1 else {
+            #if DEBUG
+            dlog("[relay][crypto] 不支持的加密版本 v=\(version)，当前仅支持 v=1")
+            #endif
+            return nil
+        }
+
         guard let nonceB64 = e2ePayload["nonce"] as? String,
               let ctAndTag = e2ePayload["ct"] as? String,
               let nonceData = Data(base64Encoded: nonceB64)

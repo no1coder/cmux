@@ -11,7 +11,9 @@ struct RelaySettings {
 
     /// 配置文件目录：~/Library/Application Support/cmux/relay/
     static let settingsDir: URL = {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            fatalError("Application Support directory unavailable")
+        }
         return appSupport.appendingPathComponent("cmux/relay", isDirectory: true)
     }()
 
@@ -74,7 +76,7 @@ struct RelaySettings {
             kSecAttrService: keychainService,
             kSecAttrAccount: phoneID,
             kSecValueData: data,
-            kSecAttrAccessible: kSecAttrAccessibleWhenUnlocked,
+            kSecAttrAccessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
         ]
 
         let status = SecItemAdd(query as CFDictionary, nil)

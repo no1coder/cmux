@@ -117,6 +117,7 @@ struct TitlebarControlsStyleConfig {
 
 final class TitlebarControlsViewModel: ObservableObject {
     weak var notificationsAnchorView: NSView?
+    weak var relayAnchorView: NSView?
 }
 
 extension Notification.Name {
@@ -255,6 +256,7 @@ struct TitlebarControlsView: View {
     @ObservedObject var viewModel: TitlebarControlsViewModel
     let onToggleSidebar: () -> Void
     let onToggleNotifications: () -> Void
+    let onToggleRelay: () -> Void
     let onNewTab: () -> Void
     let visibilityMode: TitlebarControlsVisibilityMode
     @AppStorage("titlebarControlsStyle") private var styleRawValue = TitlebarControlsStyle.classic.rawValue
@@ -395,6 +397,20 @@ struct TitlebarControlsView: View {
             .background(NotificationsAnchorView { viewModel.notificationsAnchorView = $0 })
             .accessibilityLabel(String(localized: "titlebar.notifications.accessibilityLabel", defaultValue: "Notifications"))
             .safeHelp(KeyboardShortcutSettings.Action.showNotifications.tooltip(String(localized: "titlebar.notifications.tooltip", defaultValue: "Show notifications")))
+
+            TitlebarControlButton(config: config, action: {
+                #if DEBUG
+                dlog("titlebar.relay")
+                #endif
+                onToggleRelay()
+            }) {
+                relayIconLabel(config: config)
+            }
+            .accessibilityIdentifier("titlebarControl.toggleRelay")
+            .background(RelayAnchorView { viewModel.relayAnchorView = $0 })
+            .accessibilityLabel(String(localized: "titlebar.relay.accessibilityLabel", defaultValue: "Mobile Remote"))
+            .accessibilityValue(relayAccessibilityStatus)
+            .safeHelp(String(localized: "titlebar.relay.tooltip", defaultValue: "Mobile remote access"))
 
             TitlebarControlButton(config: config, action: {
                 #if DEBUG
@@ -545,6 +561,62 @@ struct TitlebarControlsView: View {
             icon
         }
     }
+
+    // 无障碍：relay 连接状态文本
+    private var relayAccessibilityStatus: String {
+        guard RelaySettings.isEnabled else {
+            return String(localized: "relay.a11y.disabled", defaultValue: "Disabled")
+        }
+        switch RelayBootstrap.shared.client?.status {
+        case .connected:
+            return String(localized: "relay.a11y.connected", defaultValue: "Connected")
+        case .connecting:
+            return String(localized: "relay.a11y.connecting", defaultValue: "Connecting")
+        default:
+            return String(localized: "relay.a11y.disconnected", defaultValue: "Disconnected")
+        }
+    }
+
+    // 手机远程访问图标（带连接状态指示）
+    @ViewBuilder
+    private func relayIconLabel(config: TitlebarControlsStyleConfig) -> some View {
+        let relayStatus = RelayBootstrap.shared.client?.status
+        let statusColor: Color = {
+            guard RelaySettings.isEnabled else { return .gray }
+            switch relayStatus {
+            case .connected: return .green
+            case .connecting: return .yellow
+            default:
+                if RelaySettings.pairedPhoneID != nil { return .orange }
+                return .gray
+            }
+        }()
+
+        ZStack(alignment: .bottomTrailing) {
+            iconLabel(systemName: "iphone", config: config)
+
+            Circle()
+                .fill(statusColor)
+                .frame(width: 6, height: 6)
+                .offset(x: -1, y: 1)
+        }
+        .frame(width: config.buttonSize, height: config.buttonSize)
+    }
+}
+
+struct RelayAnchorView: NSViewRepresentable {
+    let onResolve: (NSView) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = AnchorNSView()
+        view.onLayout = { [weak view] in
+            guard let view else { return }
+            onResolve(view)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 struct HiddenTitlebarSidebarControlsView: View {
@@ -563,6 +635,12 @@ struct HiddenTitlebarSidebarControlsView: View {
                 AppDelegate.shared?.toggleNotificationsPopover(
                     animated: true,
                     anchorView: viewModel.notificationsAnchorView
+                )
+            },
+            onToggleRelay: { [viewModel] in
+                AppDelegate.shared?.toggleRelayPopover(
+                    animated: true,
+                    anchorView: viewModel.relayAnchorView
                 )
             },
             onNewTab: { _ = AppDelegate.shared?.tabManager?.addTab() },
@@ -789,6 +867,7 @@ final class TitlebarControlsAccessoryViewController: NSTitlebarAccessoryViewCont
         self.notificationStore = notificationStore
         let toggleSidebar = { _ = AppDelegate.shared?.sidebarState?.toggle() }
         let toggleNotifications: () -> Void = { _ = AppDelegate.shared?.toggleNotificationsPopover(animated: true) }
+        let toggleRelay: () -> Void = { _ = AppDelegate.shared?.toggleRelayPopover(animated: true) }
         let newTab = { _ = AppDelegate.shared?.tabManager?.addTab() }
 
         hostingView = NonDraggableHostingView(
@@ -797,6 +876,7 @@ final class TitlebarControlsAccessoryViewController: NSTitlebarAccessoryViewCont
                 viewModel: viewModel,
                 onToggleSidebar: toggleSidebar,
                 onToggleNotifications: toggleNotifications,
+                onToggleRelay: toggleRelay,
                 onNewTab: newTab,
                 visibilityMode: .alwaysVisible
             )

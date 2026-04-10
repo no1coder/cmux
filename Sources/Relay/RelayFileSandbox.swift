@@ -79,20 +79,20 @@ struct RelayFileSandbox {
             throw FileSandboxError.pathOutsideAllowedRoot
         }
 
-        // 4. 检查文件是否存在
-        guard FileManager.default.fileExists(atPath: standardizedPath) else {
+        // 4. 先解析符号链接，再检查存在性（消除 TOCTOU 竞态：先 exists 再 resolve 的间隙可被利用）
+        let resolvedPath = URL(fileURLWithPath: standardizedPath).resolvingSymlinksInPath().path
+
+        // 5. 检查解析后的文件是否存在
+        guard FileManager.default.fileExists(atPath: resolvedPath) else {
             throw FileSandboxError.fileNotFound
         }
 
-        // 5. 递归解析符号链接（使用 resolvingSymlinksInPath 完整解析链式符号链接）
-        let resolvedPath = URL(fileURLWithPath: standardizedPath).resolvingSymlinksInPath().path
-
-        // 检查解析后的路径是否在允许根目录下（防止符号链接逃逸）
+        // 6. 检查解析后的路径是否在允许根目录下（防止符号链接逃逸）
         if !isUnderAllowedRoot(resolvedPath) {
             throw FileSandboxError.symbolicLinkEscape
         }
 
-        // 6. 检查敏感文件模式（精确匹配路径组件，避免误判含敏感词的无害文件名）
+        // 7. 检查敏感文件模式（精确匹配路径组件，避免误判含敏感词的无害文件名）
         let nsPath = standardizedPath as NSString
         let lowerComponents = nsPath.pathComponents.map { $0.lowercased() }
         let lowerFilename = nsPath.lastPathComponent.lowercased()
@@ -100,14 +100,14 @@ struct RelayFileSandbox {
         let lowerParent = (nsPath.deletingLastPathComponent as NSString)
             .lastPathComponent.lowercased()
 
-        // 6a. 名称精确匹配（文件名或路径中任意组件）
+        // 7a. 名称精确匹配（文件名或路径中任意组件）
         for name in Self.sensitiveNames {
             if lowerComponents.contains(name) {
                 throw FileSandboxError.sensitiveFile
             }
         }
 
-        // 6b. 扩展名匹配（*.pem / *.key / *.p12 等）
+        // 7b. 扩展名匹配（*.pem / *.key / *.p12 等）
         if !lowerExtension.isEmpty, Self.sensitiveExtensions.contains(lowerExtension) {
             throw FileSandboxError.sensitiveFile
         }
