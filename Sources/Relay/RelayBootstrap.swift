@@ -10,6 +10,8 @@ final class RelayBootstrap {
     private(set) var bridge: RelayBridge?
     private(set) var screenStream: RelayScreenStream?
     private(set) var agentApproval: RelayAgentApproval?
+    /// 上次使用的 socketPath，供 stop 后重新 start 时复用
+    private(set) var lastSocketPath: String?
     /// Mac 本地操作通知观察者
     private var localObservers: [NSObjectProtocol] = []
 
@@ -18,6 +20,8 @@ final class RelayBootstrap {
     /// 启动 Relay 模块
     /// - Parameter socketPath: cmux 本地 Unix socket 路径
     func start(socketPath: String) {
+        lastSocketPath = socketPath
+
         #if DEBUG
         dlog("[relay] start() 被调用，socketPath=\(socketPath)")
         dlog("[relay] isEnabled=\(RelaySettings.isEnabled) serverURL=\(RelaySettings.serverURL ?? "nil") phoneID=\(RelaySettings.pairedPhoneID ?? "nil")")
@@ -93,9 +97,13 @@ final class RelayBootstrap {
                 )
             }
 
-            // 连接成功后，主动推送 surface 和 workspace 列表给手机
+            // 连接成功后，主动推送初始状态到手机：
+            // - capabilities.snapshot：可用 slash 命令列表（供 iPhone 动态渲染命令菜单）
+            // - surface.list_update：当前所有终端 surface
+            // - workspace.list_update：当前所有 workspace
             if status == .connected {
                 DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 1) {
+                    relayBridge?.pushCapabilities()
                     relayBridge?.pushSurfaceList()
                     relayBridge?.pushWorkspaceList()
                 }
@@ -115,7 +123,30 @@ final class RelayBootstrap {
         // 监听 Mac 本地操作，自动推送 surface 列表到手机
         observeLocalChanges(bridge: relayBridge)
 
-        // 连接到中继服务器
+        // 注入通知转发：必须在 relayClient.start() 之前同步完成
+        assert(Thread.isMainThread, "RelayBootstrap.start() 必须在主线程调用")
+        MainActor.assumeIsolated {
+            TerminalNotificationStore.shared.setRelayForwardHandler { [weak relayBridge] notification in
+                relayBridge?.pushEvent(
+                    "notification",
+                    payload: [
+                        "title": notification.title,
+                        "body": notification.body,
+                        "subtitle": notification.subtitle,
+                        "tab_id": notification.tabId.uuidString,
+                        "surface_id": notification.surfaceId?.uuidString ?? "",
+                        "created_at": Int64(notification.createdAt.timeIntervalSince1970 * 1000),
+                    ],
+                    pushHint: [
+                        "event": "notification",
+                        // 安全：不在 pushHint 中暴露终端命令内容，仅发送通用提示文本
+                        "summary": String(localized: "relay.pushHint.newNotification", defaultValue: "You have a new terminal notification"),
+                    ]
+                )
+            }
+        }
+
+        // 连接到中继服务器（handler 注入已在上方完成）
         relayClient.start()
 
         #if DEBUG
@@ -166,7 +197,14 @@ final class RelayBootstrap {
         }
         localObservers.removeAll()
 
+        // 清除通知转发回调，避免悬挂闭包
+        assert(Thread.isMainThread, "RelayBootstrap.stop() 必须在主线程调用")
+        MainActor.assumeIsolated {
+            TerminalNotificationStore.shared.setRelayForwardHandler(nil)
+        }
+
         screenStream?.stopAll()
+        bridge?.stopAllWatchers()
         client?.stop()
         client = nil
         bridge = nil

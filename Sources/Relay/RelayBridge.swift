@@ -67,6 +67,41 @@ final class RelayBridge {
     /// 保护 persistentFd 的串行队列
     private let socketQueue = DispatchQueue(label: "com.cmux.relay.socket")
 
+    // MARK: - 能力快照：Slash 命令列表
+
+    /// Claude Code 可用 slash 命令（按类别分组）
+    /// 连接时推送到 iPhone，让命令菜单动态渲染
+    private static let slashCommands: [[String: Any]] = [
+        // 常用
+        ["command": "/compact", "description": "压缩上下文", "category": "common"],
+        ["command": "/status", "description": "查看状态", "category": "common"],
+        ["command": "/clear", "description": "清除对话", "category": "common"],
+        ["command": "/help", "description": "帮助", "category": "common"],
+        ["command": "/cost", "description": "费用统计", "category": "common"],
+        // 项目
+        ["command": "/init", "description": "初始化项目", "category": "project"],
+        ["command": "/review", "description": "代码审查", "category": "project"],
+        ["command": "/bug", "description": "报告/调试 bug", "category": "project"],
+        ["command": "/terminal-setup", "description": "终端环境配置", "category": "project"],
+        // 配置
+        ["command": "/memory", "description": "记忆管理", "category": "config"],
+        ["command": "/mcp", "description": "MCP 服务", "category": "tools"],
+        ["command": "/model", "description": "切换模型", "category": "tools", "interactive": true, "options": [
+            ["key": "default", "label": "Default (推荐)"],
+            ["key": "sonnet", "label": "Sonnet 4.6"],
+            ["key": "haiku", "label": "Haiku 4.5"],
+            ["key": "opus", "label": "Opus 4.6"],
+        ]],
+        ["command": "/doctor", "description": "诊断", "category": "tools"],
+        ["command": "/listen", "description": "监听模式", "category": "tools"],
+        // 手机上不可用的命令
+        ["command": "/config", "description": "配置", "category": "config", "disabled": true, "disabledReason": "需要 TUI 交互"],
+        ["command": "/permissions", "description": "权限管理", "category": "config", "disabled": true, "disabledReason": "需要 TUI 交互"],
+        ["command": "/vim", "description": "Vim 模式", "category": "tools", "disabled": true, "disabledReason": "需要 TUI 交互"],
+        ["command": "/allowed-tools", "description": "管理允许的工具", "category": "config", "disabled": true, "disabledReason": "需要 TUI 交互"],
+        ["command": "/install-github-app", "description": "安装 GitHub App", "category": "tools"],
+    ]
+
     // MARK: - 安全：RPC 方法白名单
 
     /// 允许手机端通过 relay 转发到本地 socket 的方法白名单
@@ -750,6 +785,15 @@ final class RelayBridge {
         }
 
         pushEvent("phase.update", payload: payload, pushHint: pushHint)
+    }
+
+    /// 推送能力快照到 iPhone（可用的 slash 命令列表）
+    /// 连接建立后调用一次即可；命令列表在会话期间不会变化
+    func pushCapabilities() {
+        pushEvent("capabilities.snapshot", payload: [
+            "slash_commands": Self.slashCommands,
+            "version": 1,
+        ])
     }
 
     /// 推送所有 workspace 的 surface 列表到手机端
