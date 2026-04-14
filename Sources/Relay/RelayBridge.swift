@@ -1532,10 +1532,28 @@ final class RelayBridge {
         return snapshot
     }
 
+    /// 失效指定路径的 Claude 历史快照缓存。
+    /// 会同步清理 inflight 条目并唤醒等待者，避免被其它线程长期阻塞。
     func invalidateClaudeHistorySnapshot(path: String) {
         claudeHistoryCacheLock.lock()
-        claudeHistoryCache.removeValue(forKey: path)
+        let condition = invalidateClaudeHistorySnapshot_locked(path: path)
         claudeHistoryCacheLock.unlock()
+        // broadcast 必须在释放 cacheLock 之后进行，避免持有多把锁
+        if let condition {
+            condition.lock()
+            condition.broadcast()
+            condition.unlock()
+        }
+    }
+
+    /// 假定调用方已持有 `claudeHistoryCacheLock` 的版本。
+    /// 返回需要在释放锁后 broadcast 的 inflight condition（若存在）。
+    /// 调用方必须负责在释放 `claudeHistoryCacheLock` 之后对返回的 condition 进行 broadcast。
+    @discardableResult
+    private func invalidateClaudeHistorySnapshot_locked(path: String) -> NSCondition? {
+        claudeHistoryCache.removeValue(forKey: path)
+        // 同时清理 inflight 占位，返回 condition 给调用方 broadcast
+        return claudeHistoryInflight.removeValue(forKey: path)
     }
 
     func parseClaudeHistorySnapshot(
@@ -1979,9 +1997,18 @@ final class RelayBridge {
             }
             self.jsonlWatchers.removeAll()
             self.watchedSurfaces.removeAll()
+            // 清空整个缓存 + inflight，唤醒所有等待者
             self.claudeHistoryCacheLock.lock()
             self.claudeHistoryCache.removeAll()
+            let pendingConditions = Array(self.claudeHistoryInflight.values)
+            self.claudeHistoryInflight.removeAll()
             self.claudeHistoryCacheLock.unlock()
+            // broadcast 放在锁外，避免多锁嵌套
+            for condition in pendingConditions {
+                condition.lock()
+                condition.broadcast()
+                condition.unlock()
+            }
         }
     }
 

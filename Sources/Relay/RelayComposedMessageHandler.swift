@@ -57,8 +57,8 @@ final class RelayComposedMessageHandler {
     }
 
     private func handleStart(_ params: [String: Any]) -> [String: Any] {
-        // 顺便清理超时消息
-        cleanupStaleMessages()
+        // 顺便清理超时消息（此处已在 queue.sync 上下文中，必须走 unsafe 版本避免递归死锁）
+        _cleanupStaleMessagesUnsafe()
 
         guard let msgID = params["msg_id"] as? String,
               let surfaceID = params["surface_id"] as? String,
@@ -245,8 +245,17 @@ final class RelayComposedMessageHandler {
 
     // MARK: - 清理
 
-    /// 清理超时的未完成消息（可定期调用）
+    /// 清理超时的未完成消息（可定期调用）。
+    /// 外部公开接口：自行 queue.sync 包裹，可在任意线程安全调用。
     func cleanupStaleMessages(olderThan seconds: TimeInterval = 60) {
+        queue.sync {
+            _cleanupStaleMessagesUnsafe(olderThan: seconds)
+        }
+    }
+
+    /// 假定调用方已在 `queue` 上下文中的内部版本。
+    /// 严禁从 queue 之外的线程直接调用，否则 pendingMessages 读写无线程安全保证。
+    private func _cleanupStaleMessagesUnsafe(olderThan seconds: TimeInterval = 60) {
         let cutoff = Date().addingTimeInterval(-seconds)
         pendingMessages = pendingMessages.filter { $0.value.createdAt > cutoff }
     }
