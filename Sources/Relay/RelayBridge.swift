@@ -7,6 +7,15 @@ import Foundation
 /// 负责：解析 Relay Envelope → 转发到本地 socket → 包装响应回传
 final class RelayBridge {
 
+    struct ClaudeHistorySnapshot {
+        let fileSize: UInt64
+        let modifiedAt: Date?
+        let messages: [[String: Any]]
+        let totalSeq: Int
+        let status: String
+        let usage: [String: Any]
+    }
+
     // MARK: - 属性
 
     /// 本地 cmux Unix socket 路径
@@ -38,6 +47,9 @@ final class RelayBridge {
     private var watchedSurfaces: [String: String] = [:]
     /// 监听相关操作的串行队列
     private let watcherQueue = DispatchQueue(label: "com.cmux.relay.jsonlWatcher")
+    /// Claude JSONL 解析缓存，避免同一文件在未变化时被重复整份扫描
+    private var claudeHistoryCache: [String: ClaudeHistorySnapshot] = [:]
+    private let claudeHistoryCacheLock = NSLock()
 
     // MARK: - Claude 阶段状态
 
@@ -213,11 +225,16 @@ final class RelayBridge {
             #endif
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self else { return }
-                let allSurfaces = self.collectAllSurfaces()
+                let result: [String: Any]
+                if let params, !params.isEmpty {
+                    result = self.forwardingResult(method: method, params: params)
+                } else {
+                    result = self.collectAllSurfacesResult()
+                }
                 #if DEBUG
-                dlog("[relay] surface.list 完成, 共 \(allSurfaces.count) 个 surface")
+                dlog("[relay] surface.list 完成, keys=\(result.keys.sorted())")
                 #endif
-                self.sendRPCResponse(requestID: requestID, result: ["surfaces": allSurfaces])
+                self.sendRPCResponse(requestID: requestID, result: result)
             }
 
         // 状态变更命令：执行后推送更新的 surface 列表
@@ -308,7 +325,14 @@ final class RelayBridge {
                     return
                 }
                 let afterSeq = params?["after_seq"] as? Int ?? 0
-                let result = self.readClaudeMessages(surfaceID: surfaceID, afterSeq: afterSeq)
+                let beforeSeq = params?["before_seq"] as? Int
+                let limit = params?["limit"] as? Int
+                let result = self.readClaudeMessages(
+                    surfaceID: surfaceID,
+                    afterSeq: afterSeq,
+                    beforeSeq: beforeSeq,
+                    limit: limit
+                )
                 self.sendRPCResponse(requestID: requestID, result: result)
             }
 
@@ -942,21 +966,26 @@ final class RelayBridge {
         #endif
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            let allSurfaces = self.collectAllSurfaces()
+            let result = self.collectAllSurfacesResult()
             #if DEBUG
-            dlog("[relay] pushSurfaceList: 共 \(allSurfaces.count) 个 surface")
+            dlog("[relay] pushSurfaceList: keys=\(result.keys.sorted())")
             #endif
-            self.pushEvent("surface.list_update", payload: ["surfaces": allSurfaces])
+            self.pushEvent("surface.list_update", payload: result)
         }
     }
 
     /// 收集所有 workspace 的 surfaces
     /// 注意：使用 workspace_id 参数直接查询，不切换当前 workspace，避免 UI 卡顿
-    private func collectAllSurfaces() -> [[String: Any]] {
-        guard let wsResp = sendJsonRPC(method: "workspace.list", params: nil),
-              let wsResult = wsResp["result"] as? [String: Any],
+    private func collectAllSurfacesResult() -> [String: Any] {
+        guard let wsResp = sendJsonRPC(method: "workspace.list", params: nil) else {
+            return ["error": "workspace_list_unavailable", "message": "workspace.list returned no response"]
+        }
+        if let errorResult = normalizedErrorResult(from: wsResp) {
+            return errorResult
+        }
+        guard let wsResult = wsResp["result"] as? [String: Any],
               let workspaces = wsResult["workspaces"] as? [[String: Any]] else {
-            return []
+            return ["error": "workspace_list_invalid", "message": "workspace.list returned invalid payload"]
         }
 
         var allSurfaces: [[String: Any]] = []
@@ -969,6 +998,7 @@ final class RelayBridge {
 
             // 使用 workspace_id 参数直接查询，不需要 workspace.select
             if let surfResp = sendJsonRPC(method: "surface.list", params: ["workspace_id": wsID]),
+               normalizedErrorResult(from: surfResp) == nil,
                let surfResult = surfResp["result"] as? [String: Any],
                let surfaces = surfResult["surfaces"] as? [[String: Any]] {
                 for var surf in surfaces {
@@ -979,7 +1009,7 @@ final class RelayBridge {
             }
         }
 
-        return allSurfaces
+        return ["surfaces": allSurfaces]
     }
 
     /// 发送 JSON-RPC 请求并返回解析后的响应（自动加锁）
@@ -988,8 +1018,8 @@ final class RelayBridge {
             "jsonrpc": "2.0",
             "method": method,
             "id": Self.nextRpcID(),
+            "params": params ?? [:],
         ]
-        if let params { request["params"] = params }
 
         guard let jsonData = try? JSONSerialization.data(withJSONObject: request),
               let jsonString = String(data: jsonData, encoding: .utf8),
@@ -1001,14 +1031,41 @@ final class RelayBridge {
         return parsed
     }
 
+    private func forwardingResult(method: String, params: [String: Any]) -> [String: Any] {
+        guard let response = sendJsonRPC(method: method, params: params) else {
+            return ["error": "socket_unavailable", "message": "\(method) returned no response"]
+        }
+        if let errorResult = normalizedErrorResult(from: response) {
+            return errorResult
+        }
+        return (response["result"] as? [String: Any]) ?? response
+    }
+
+    private func normalizedErrorResult(from response: [String: Any]) -> [String: Any]? {
+        if let error = response["error"] as? [String: Any] {
+            return [
+                "error": error["code"] as? String ?? "rpc_error",
+                "message": error["message"] as? String ?? "RPC failed",
+                "data": error["data"] as Any
+            ]
+        }
+        if let error = response["error"] as? String {
+            return [
+                "error": error,
+                "message": response["message"] as? String ?? error
+            ]
+        }
+        return nil
+    }
+
     /// 不持锁版本，供已在 socketQueue 内的代码调用
     private func _sendJsonRPCUnsafe(method: String, params: [String: Any]?) -> [String: Any]? {
         var request: [String: Any] = [
             "jsonrpc": "2.0",
             "method": method,
             "id": Self.nextRpcID(),
+            "params": params ?? [:],
         ]
-        if let params { request["params"] = params }
 
         guard let jsonData = try? JSONSerialization.data(withJSONObject: request),
               let jsonString = String(data: jsonData, encoding: .utf8),
@@ -1029,6 +1086,7 @@ final class RelayBridge {
                 "jsonrpc": "2.0",
                 "method": "workspace.list",
                 "id": Self.nextRpcID(),
+                "params": [:],
             ]
             guard let jsonData = try? JSONSerialization.data(withJSONObject: request),
                   let jsonString = String(data: jsonData, encoding: .utf8),
@@ -1308,7 +1366,8 @@ final class RelayBridge {
         return false
     }
 
-    private func readClaudeMessages(surfaceID: String, afterSeq: Int) -> [String: Any] {
+    private func readClaudeMessages(surfaceID: String, afterSeq: Int, beforeSeq: Int? = nil, limit: Int? = nil) -> [String: Any] {
+        let requestStartedAt = CFAbsoluteTimeGetCurrent()
         // 1. 先从 session store 精确匹配 surfaceId → sessionId
         let jsonlPath: String
         if let sessionId = lookupSessionId(forSurface: surfaceID) {
@@ -1336,17 +1395,99 @@ final class RelayBridge {
         }
 
         let fm = FileManager.default
+        let attrs = try? fm.attributesOfItem(atPath: jsonlPath)
+        let fileSize = (attrs?[.size] as? UInt64) ?? 0
+        let modifiedAt = attrs?[.modificationDate] as? Date
 
-        guard let data = fm.contents(atPath: jsonlPath),
-              let content = String(data: data, encoding: .utf8) else {
+        guard let snapshot = loadClaudeHistorySnapshot(
+            path: jsonlPath,
+            fileSize: fileSize,
+            modifiedAt: modifiedAt
+        ) else {
             return ["error": "无法读取会话文件", "messages": []]
         }
+        let paginateStartedAt = CFAbsoluteTimeGetCurrent()
+        let page = paginateClaudeHistory(
+            snapshot: snapshot,
+            afterSeq: afterSeq,
+            beforeSeq: beforeSeq,
+            limit: limit
+        )
 
+        #if DEBUG
+        let paginateMs = Int((CFAbsoluteTimeGetCurrent() - paginateStartedAt) * 1000)
+        let totalMs = Int((CFAbsoluteTimeGetCurrent() - requestStartedAt) * 1000)
+        dlog("[relay] claude.messages: surfaceID=\(surfaceID.prefix(8)) jsonl=\(jsonlPath.components(separatedBy: "/").last ?? "?") returned=\(page.messages.count) total=\(snapshot.messages.count) afterSeq=\(afterSeq) beforeSeq=\(beforeSeq ?? 0) limit=\(limit ?? 0) hasMore=\(page.hasMore) status=\(snapshot.status) paginateMs=\(paginateMs) totalMs=\(totalMs)")
+        #endif
+
+        return [
+            "messages": page.messages,
+            "session_file": jsonlPath.components(separatedBy: "/").last ?? "",
+            "total_seq": snapshot.totalSeq,
+            "status": snapshot.status,
+            "usage": snapshot.usage,
+            "has_more": page.hasMore,
+            "next_before_seq": page.nextBeforeSeq,
+        ]
+    }
+
+    func loadClaudeHistorySnapshot(
+        path: String,
+        fileSize: UInt64,
+        modifiedAt: Date?
+    ) -> ClaudeHistorySnapshot? {
+        let startedAt = CFAbsoluteTimeGetCurrent()
+        claudeHistoryCacheLock.lock()
+        if let cached = claudeHistoryCache[path],
+           cached.fileSize == fileSize,
+           cached.modifiedAt == modifiedAt {
+            claudeHistoryCacheLock.unlock()
+            #if DEBUG
+            let elapsedMs = Int((CFAbsoluteTimeGetCurrent() - startedAt) * 1000)
+            dlog("[relay] claude.history cache hit path=\((path as NSString).lastPathComponent) totalSeq=\(cached.totalSeq) elapsedMs=\(elapsedMs)")
+            #endif
+            return cached
+        }
+        claudeHistoryCacheLock.unlock()
+
+        let readStartedAt = CFAbsoluteTimeGetCurrent()
+        guard let data = FileManager.default.contents(atPath: path),
+              let content = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        let readMs = Int((CFAbsoluteTimeGetCurrent() - readStartedAt) * 1000)
+
+        let parseStartedAt = CFAbsoluteTimeGetCurrent()
+        let snapshot = parseClaudeHistorySnapshot(
+            content: content,
+            fileSize: fileSize,
+            modifiedAt: modifiedAt
+        )
+        let parseMs = Int((CFAbsoluteTimeGetCurrent() - parseStartedAt) * 1000)
+        claudeHistoryCacheLock.lock()
+        claudeHistoryCache[path] = snapshot
+        claudeHistoryCacheLock.unlock()
+        #if DEBUG
+        let totalMs = Int((CFAbsoluteTimeGetCurrent() - startedAt) * 1000)
+        dlog("[relay] claude.history cache miss path=\((path as NSString).lastPathComponent) bytes=\(fileSize) totalSeq=\(snapshot.totalSeq) readMs=\(readMs) parseMs=\(parseMs) totalMs=\(totalMs)")
+        #endif
+        return snapshot
+    }
+
+    func invalidateClaudeHistorySnapshot(path: String) {
+        claudeHistoryCacheLock.lock()
+        claudeHistoryCache.removeValue(forKey: path)
+        claudeHistoryCacheLock.unlock()
+    }
+
+    func parseClaudeHistorySnapshot(
+        content: String,
+        fileSize: UInt64,
+        modifiedAt: Date?
+    ) -> ClaudeHistorySnapshot {
         let lines = content.components(separatedBy: "\n")
         var messages: [[String: Any]] = []
         var seq = 0
-
-        // 累计 token 使用量（遍历所有 assistant 消息）
         var totalInputTokens = 0
         var totalOutputTokens = 0
         var totalCacheCreationTokens = 0
@@ -1354,31 +1495,21 @@ final class RelayBridge {
 
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { continue }
-
-            guard let lineData = trimmed.data(using: .utf8),
+            guard !trimmed.isEmpty,
+                  let lineData = trimmed.data(using: .utf8),
                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
                 continue
             }
 
             let msgType = json["type"] as? String ?? ""
-
-            // 跳过内部事件
             let internalTypes: Set<String> = [
                 "file-history-snapshot", "change", "queue-operation", "permission-mode",
             ]
             if internalTypes.contains(msgType) { continue }
-
-            // 只处理 user 和 assistant 消息
             guard msgType == "user" || msgType == "assistant" else { continue }
-
-            // 过滤系统注入的 user 消息（skill 展开、任务通知、命令输出等）
             if msgType == "user", Self.isSystemInjectedUserMessage(json) { continue }
 
             seq += 1
-            if seq <= afterSeq { continue }
-
-            // 提取消息内容
             var msgResult: [String: Any] = [
                 "seq": seq,
                 "type": msgType,
@@ -1387,7 +1518,6 @@ final class RelayBridge {
             ]
 
             if let message = json["message"] as? [String: Any] {
-                // stop_reason：null=生成中, end_turn=完成, tool_use=等待工具
                 if let stopReason = message["stop_reason"] as? String {
                     msgResult["stop_reason"] = stopReason
                 }
@@ -1442,7 +1572,6 @@ final class RelayBridge {
                     msgResult["model"] = model
                 }
 
-                // 累计 token 使用量
                 if msgType == "assistant", let usage = message["usage"] as? [String: Any] {
                     totalInputTokens += usage["input_tokens"] as? Int ?? 0
                     totalOutputTokens += usage["output_tokens"] as? Int ?? 0
@@ -1454,7 +1583,6 @@ final class RelayBridge {
             messages.append(msgResult)
         }
 
-        // 推断整体状态：基于最后一条消息
         var status = "idle"
         if let lastMsg = messages.last {
             let lastType = lastMsg["type"] as? String ?? ""
@@ -1466,14 +1594,10 @@ final class RelayBridge {
             } else if lastType == "user" {
                 let blocks = lastMsg["content"] as? [[String: Any]] ?? []
                 if blocks.contains(where: { ($0["type"] as? String) == "tool_result" }) {
-                    status = "thinking" // 工具结果返回后 Claude 会继续思考
+                    status = "thinking"
                 }
             }
         }
-
-        #if DEBUG
-        dlog("[relay] claude.messages: surfaceID=\(surfaceID.prefix(8)) jsonl=\(jsonlPath.components(separatedBy: "/").last ?? "?") total=\(messages.count) afterSeq=\(afterSeq) status=\(status)")
-        #endif
 
         let totalTokens = totalInputTokens + totalOutputTokens + totalCacheCreationTokens + totalCacheReadTokens
         let usage: [String: Any] = [
@@ -1484,13 +1608,48 @@ final class RelayBridge {
             "total_tokens": totalTokens,
         ]
 
-        return [
-            "messages": messages,
-            "session_file": jsonlPath.components(separatedBy: "/").last ?? "",
-            "total_seq": seq,
-            "status": status,
-            "usage": usage,
-        ]
+        return ClaudeHistorySnapshot(
+            fileSize: fileSize,
+            modifiedAt: modifiedAt,
+            messages: messages,
+            totalSeq: seq,
+            status: status,
+            usage: usage
+        )
+    }
+
+    func paginateClaudeHistory(
+        snapshot: ClaudeHistorySnapshot,
+        afterSeq: Int,
+        beforeSeq: Int?,
+        limit: Int?
+    ) -> (messages: [[String: Any]], hasMore: Bool, nextBeforeSeq: Int) {
+        let messages = snapshot.messages.filter { ($0["seq"] as? Int ?? 0) > afterSeq }
+
+        let selectedMessages: [[String: Any]]
+        let hasMore: Bool
+        if let beforeSeq, beforeSeq > 0 {
+            let candidate = messages.filter { ($0["seq"] as? Int ?? 0) < beforeSeq }
+            if let limit, limit > 0, candidate.count > limit {
+                selectedMessages = Array(candidate.suffix(limit))
+            } else {
+                selectedMessages = candidate
+            }
+            hasMore = (selectedMessages.first?["seq"] as? Int ?? 0) > 1
+        } else if let limit, limit > 0, afterSeq <= 0 {
+            if messages.count > limit {
+                selectedMessages = Array(messages.suffix(limit))
+            } else {
+                selectedMessages = messages
+            }
+            hasMore = messages.count > selectedMessages.count
+        } else {
+            selectedMessages = messages
+            hasMore = false
+        }
+
+        let nextBeforeSeq = (selectedMessages.first?["seq"] as? Int) ?? 0
+        return (selectedMessages, hasMore, nextBeforeSeq)
     }
 
     /// 获取 surface 的工作目录
@@ -1683,6 +1842,7 @@ final class RelayBridge {
         guard let path = watchedSurfaces.removeValue(forKey: surfaceID),
               let watcher = jsonlWatchers.removeValue(forKey: path) else { return }
         watcher.source.cancel()
+        invalidateClaudeHistorySnapshot(path: path)
         #if DEBUG
         dlog("[relay] 停止监听 JSONL: surface \(surfaceID.prefix(8))")
         #endif
@@ -1761,6 +1921,9 @@ final class RelayBridge {
             }
             self.jsonlWatchers.removeAll()
             self.watchedSurfaces.removeAll()
+            self.claudeHistoryCacheLock.lock()
+            self.claudeHistoryCache.removeAll()
+            self.claudeHistoryCacheLock.unlock()
         }
     }
 
@@ -1778,12 +1941,14 @@ final class RelayBridge {
             #endif
             watcher.lastSize = 0
             jsonlWatchers[path] = watcher
+            invalidateClaudeHistorySnapshot(path: path)
             // 通知手机端清空旧消息，重新加载
             pushEvent("claude.session.reset", payload: ["surface_id": surfaceID])
         }
 
         // 文件没有变大，跳过
         guard newSize > watcher.lastSize else { return }
+        invalidateClaudeHistorySnapshot(path: path)
 
         // 读取新增内容
         guard let fh = FileHandle(forReadingAtPath: path) else { return }

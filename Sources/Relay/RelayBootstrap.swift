@@ -21,9 +21,8 @@ final class RelayBootstrap {
     /// - Parameter socketPath: cmux 本地 Unix socket 路径
     func start(socketPath: String) {
         lastSocketPath = socketPath
-
-        let hasSecret = RelaySettings.pairedPhoneID.flatMap { RelaySettings.loadPairSecret(forPhone: $0) } != nil
-        print("[relay] start() isEnabled=\(RelaySettings.isEnabled) serverURL=\(RelaySettings.serverURL ?? "nil") phoneID=\(RelaySettings.pairedPhoneID ?? "nil") hasSecret=\(hasSecret)")
+        let pairedPhoneID = RelaySettings.pairedPhoneID
+        print("[relay] start() isEnabled=\(RelaySettings.isEnabled) serverURL=\(RelaySettings.serverURL ?? "nil") phoneID=\(pairedPhoneID ?? "nil")")
 
         guard RelaySettings.isEnabled else {
             print("[relay] 远程访问未启用，跳过")
@@ -35,7 +34,7 @@ final class RelayBootstrap {
             return
         }
 
-        guard let phoneID = RelaySettings.pairedPhoneID,
+        guard let phoneID = pairedPhoneID,
               let pairSecret = RelaySettings.loadPairSecret(forPhone: phoneID)
         else {
             print("[relay] 未配对或 secret 丢失，跳过连接")
