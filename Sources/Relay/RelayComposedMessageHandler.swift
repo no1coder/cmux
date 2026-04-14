@@ -104,7 +104,7 @@ final class RelayComposedMessageHandler {
             return ["error": "invalid composed_msg.block params"]
         }
 
-        guard var pending = pendingMessages[msgID] else {
+        guard let pending = pendingMessages[msgID] else {
             return ["error": "unknown msg_id: \(msgID)"]
         }
 
@@ -136,8 +136,8 @@ final class RelayComposedMessageHandler {
             return ["error": "unknown block type: \(type)"]
         }
 
+        // PendingMessage 是 class，引用语义，无需写回字典
         pending.blocks.append((index: index, block: block))
-        pendingMessages[msgID] = pending
 
         #if DEBUG
         dlog("[relay][compose] block: msgID=\(msgID) index=\(index) type=\(type) received=\(pending.blocks.count)/\(pending.expectedBlockCount)")
@@ -198,19 +198,17 @@ final class RelayComposedMessageHandler {
                     try? data.write(to: URL(fileURLWithPath: filePath))
                     tempFilePaths.append(filePath)
 
-                    // 写入系统剪贴板（使用 async + 信号量，避免 main.sync 死锁风险）
-                    let semaphore = DispatchSemaphore(value: 0)
-                    DispatchQueue.main.async {
+                    // 写入系统剪贴板：使用 asyncAndWait 在 main queue 上同步执行
+                    // 相比 semaphore + async 的组合，asyncAndWait 不会阻塞调用线程的
+                    // 同时引发 main queue 排队死锁（macOS 13+）
+                    DispatchQueue.main.asyncAndWait {
                         let pasteboard = NSPasteboard.general
                         pasteboard.clearContents()
                         // 同时提供 TIFF 和 PNG 格式，确保 Claude Code 能识别
                         if let image = NSImage(data: data) {
                             pasteboard.writeObjects([image])
                         }
-                        semaphore.signal()
                     }
-                    // 等待剪贴板写入完成（超时 2 秒防止无限等待）
-                    _ = semaphore.wait(timeout: .now() + 2.0)
 
                     // 模拟 Cmd+V 粘贴图片（macOS 粘贴快捷键）
                     bridge.forwardToSocketDirect(
@@ -219,14 +217,14 @@ final class RelayComposedMessageHandler {
                     )
                 }
 
-                // 块间等待，确保终端处理完上一步
+                // 块间等待，确保终端处理完上一步（非关键路径，usleep 比 Thread.sleep 更轻量）
                 if i < blocks.count - 1 {
-                    Thread.sleep(forTimeInterval: 0.15)
+                    usleep(150_000)
                 }
             }
 
             // 最后等待一下再按回车提交
-            Thread.sleep(forTimeInterval: 0.1)
+            usleep(100_000)
             bridge.forwardToSocketDirect(
                 method: "surface.send_key",
                 params: ["surface_id": surfaceID, "key": "enter"]
@@ -256,12 +254,19 @@ final class RelayComposedMessageHandler {
 
 // MARK: - 内部数据结构
 
-private struct PendingMessage {
+/// 使用引用语义，避免 struct 副本 mutation 漏写回的坑
+private final class PendingMessage {
     let msgID: String
     let surfaceID: String
     let expectedBlockCount: Int
     var blocks: [(index: Int, block: ReceivedBlock)] = []
     let createdAt = Date()
+
+    init(msgID: String, surfaceID: String, expectedBlockCount: Int) {
+        self.msgID = msgID
+        self.surfaceID = surfaceID
+        self.expectedBlockCount = expectedBlockCount
+    }
 }
 
 enum ReceivedBlock {

@@ -50,6 +50,9 @@ final class RelayBridge {
     /// Claude JSONL 解析缓存，避免同一文件在未变化时被重复整份扫描
     private var claudeHistoryCache: [String: ClaudeHistorySnapshot] = [:]
     private let claudeHistoryCacheLock = NSLock()
+    /// 正在解析中的路径集合，避免并发请求重复 I/O+parse（TOCTOU 修复）
+    /// 值为 NSCondition，用于唤醒等待同一路径解析完成的其他线程
+    private var claudeHistoryInflight: [String: NSCondition] = [:]
 
     // MARK: - Claude 阶段状态
 
@@ -1437,6 +1440,8 @@ final class RelayBridge {
         modifiedAt: Date?
     ) -> ClaudeHistorySnapshot? {
         let startedAt = CFAbsoluteTimeGetCurrent()
+
+        // 检查缓存 + inflight，使用同一把锁避免 TOCTOU
         claudeHistoryCacheLock.lock()
         if let cached = claudeHistoryCache[path],
            cached.fileSize == fileSize,
@@ -1448,11 +1453,64 @@ final class RelayBridge {
             #endif
             return cached
         }
+
+        // 如果已有其他线程在解析同一路径，等待其完成后读缓存
+        if let condition = claudeHistoryInflight[path] {
+            claudeHistoryCacheLock.unlock()
+            // NSCondition 使用协议：持有 condition 锁 → 检查谓词 → wait → 再检查
+            condition.lock()
+            while true {
+                claudeHistoryCacheLock.lock()
+                let stillInflight = claudeHistoryInflight[path] === condition
+                claudeHistoryCacheLock.unlock()
+                if !stillInflight { break }
+                condition.wait()
+            }
+            condition.unlock()
+
+            // 解析完成后读缓存
+            claudeHistoryCacheLock.lock()
+            let cached = claudeHistoryCache[path]
+            claudeHistoryCacheLock.unlock()
+
+            #if DEBUG
+            if let cached {
+                let elapsedMs = Int((CFAbsoluteTimeGetCurrent() - startedAt) * 1000)
+                dlog("[relay] claude.history inflight wait hit path=\((path as NSString).lastPathComponent) totalSeq=\(cached.totalSeq) elapsedMs=\(elapsedMs)")
+            }
+            #endif
+            // 校验 fileSize/modifiedAt 是否匹配本次请求；若不匹配则重新解析
+            if let cached,
+               cached.fileSize == fileSize,
+               cached.modifiedAt == modifiedAt {
+                return cached
+            }
+            // 不匹配：文件被再次修改，递归重新检查/解析
+            return loadClaudeHistorySnapshot(path: path, fileSize: fileSize, modifiedAt: modifiedAt)
+        }
+
+        // 占位 inflight，unlock 后做 I/O
+        let condition = NSCondition()
+        claudeHistoryInflight[path] = condition
         claudeHistoryCacheLock.unlock()
+
+        // 确保异常路径也会清理 inflight 并唤醒等待者
+        func finishInflight(withSnapshot snapshot: ClaudeHistorySnapshot?) {
+            claudeHistoryCacheLock.lock()
+            if let snapshot {
+                claudeHistoryCache[path] = snapshot
+            }
+            claudeHistoryInflight.removeValue(forKey: path)
+            claudeHistoryCacheLock.unlock()
+            condition.lock()
+            condition.broadcast()
+            condition.unlock()
+        }
 
         let readStartedAt = CFAbsoluteTimeGetCurrent()
         guard let data = FileManager.default.contents(atPath: path),
               let content = String(data: data, encoding: .utf8) else {
+            finishInflight(withSnapshot: nil)
             return nil
         }
         let readMs = Int((CFAbsoluteTimeGetCurrent() - readStartedAt) * 1000)
@@ -1464,9 +1522,9 @@ final class RelayBridge {
             modifiedAt: modifiedAt
         )
         let parseMs = Int((CFAbsoluteTimeGetCurrent() - parseStartedAt) * 1000)
-        claudeHistoryCacheLock.lock()
-        claudeHistoryCache[path] = snapshot
-        claudeHistoryCacheLock.unlock()
+
+        finishInflight(withSnapshot: snapshot)
+
         #if DEBUG
         let totalMs = Int((CFAbsoluteTimeGetCurrent() - startedAt) * 1000)
         dlog("[relay] claude.history cache miss path=\((path as NSString).lastPathComponent) bytes=\(fileSize) totalSeq=\(snapshot.totalSeq) readMs=\(readMs) parseMs=\(parseMs) totalMs=\(totalMs)")
