@@ -315,10 +315,24 @@ final class RelayClient: NSObject {
     }
 
     private func sendPing() {
+        // pong 超时 watchdog：若 pongTimeout 内 sendPing 的回调未触发，
+        // 视为链路僵死（NAT 过期、网络切换后 TCP keepalive 尚未唤醒）。
+        // 强制重连以重新向 relay 注册 device。
+        var didComplete = false
+        let pongTimeout: TimeInterval = 15
         webSocketTask?.sendPing { [weak self] error in
+            didComplete = true
             if let error {
                 self?.handleConnectionFailure(error: error)
             }
+        }
+        stateQueue.asyncAfter(deadline: .now() + pongTimeout) { [weak self] in
+            guard let self, !didComplete, self.status == .connected else { return }
+            let err = NSError(
+                domain: "RelayClient", code: -1001,
+                userInfo: [NSLocalizedDescriptionKey: "heartbeat pong timeout"]
+            )
+            self.handleConnectionFailure(error: err)
         }
     }
 
